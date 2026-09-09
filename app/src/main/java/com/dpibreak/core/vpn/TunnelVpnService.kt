@@ -55,8 +55,8 @@ class TunnelVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                startTunnel()
                 startForegroundService()
+                startTunnel()
             }
             ACTION_STOP -> stopTunnel()
         }

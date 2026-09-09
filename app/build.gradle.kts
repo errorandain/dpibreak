@@ -44,9 +44,9 @@ android {
         compose = true
     }
     externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+        ndkBuild {
+            // ndk-build: our bridge + byedpi + hev-socks5-tunnel (see app/src/main/jni/Android.mk)
+            path = file("src/main/jni/Android.mk")
         }
     }
 }

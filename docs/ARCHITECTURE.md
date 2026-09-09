@@ -42,7 +42,7 @@
 | `core/engine/DesyncEngine.kt` | контракт движка десинка |
 | `core/engine/ByedpiJniEngine.kt` | реализация через JNI над C-ядром byedpi |
 | `core/tunnel/TunSocksBridge.kt` | обёртка hev-socks5-tunnel (TUN→SOCKS5) |
-| `app/src/main/cpp/` | нативная часть: JNI-мост, ядро byedpi, туннель |
+| `app/src/main/jni/` | нативная часть (ndk-build): JNI-мост, ядро byedpi, hev-socks5-tunnel |
 | `assets/hostlists/*.txt` | списки доменов по сервисам |
 
 Планируемые добавления (см. ROADMAP): `core/dns/` (DoH-резолвер), `ui/` (экраны),
@@ -69,7 +69,7 @@
 
 | Проект | Роль | Лицензия | Способ подключения |
 |---|---|---|---|
-| [hufrea/byedpi](https://github.com/hufrea/byedpi) | движок десинка (SOCKS5 + split/fake/disorder/tlsrec) | MIT | git submodule → static lib → JNI |
-| [heiher/hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) | tun2socks | MIT | git submodule → ndk-build/CMake → JNI |
+| [hufrea/byedpi](https://github.com/hufrea/byedpi) | движок десинка (SOCKS5 + split/fake/disorder/tlsrec) | MIT | vendored-копия в `jni/byedpi/` + ndk-build |
+| [heiher/hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) | tun2socks | MIT | vendored-копия в `jni/hev-socks5-tunnel/` + ndk-build, JNI через -DPKGNAME |
 
 Оба — MIT: допустимо использование в проекте с лицензией MIT при сохранении копирайт-уведомлений (файлы `LICENSE*` этих проектов нельзя удалять из сабмодулей; при форке их кода — сохранять заголовки).

@@ -15,7 +15,7 @@ DPIBreak — Android-приложение для локального обход
 ## Стек
 
 - Kotlin 2.0, Jetpack Compose (Material3), minSdk 24, targetSdk 35, JDK 17
-- NDK + CMake 3.22.1 (нативная часть: app/src/main/cpp/)
+- NDK + CMake 3.22.1 (нативная часть: app/src/main/jni/ (ndk-build: byedpi + hev-socks5-tunnel, vendored))
 - Версии зависимостей — только в gradle/libs.versions.toml (не дублировать в build-файлах)
 
 ## Карта знаний (читай при необходимости)
