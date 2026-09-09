@@ -26,6 +26,7 @@ add_library(byedpi STATIC ${BYEDPI_SOURCES})
 target_include_directories(byedpi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/byedpi)
 target_compile_options(byedpi PRIVATE
     -D_DEFAULT_SOURCE
+    -DANDROID_APP
     -std=c99
     -O2
     -Wall
@@ -37,4 +38,4 @@ target_compile_options(byedpi PRIVATE
 
 # Основная библиотека DPIBreak
 add_library(dpibreak SHARED native-lib.c)
-target_link_libraries(dpibreak byedpi)
+target_link_libraries(dpibreak byedpi log)
