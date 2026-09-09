@@ -33,7 +33,7 @@ import com.dpibreak.core.vpn.TunnelVpnService
  */
 class MainActivity : ComponentActivity() {
 
-    private val vpnPermissionLauncher = registerForActivityResult(
+    internal val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         // Пользователь дал или отклонил разрешение VPN
