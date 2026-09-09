@@ -27,10 +27,14 @@ jobs:
 
       # Согласие с лицензиями Android SDK и установка нужной платформы (API 35)
       # (на облачных серверах GitHub Android SDK есть, но не со всеми версиями)
-      - name: Setup Android SDK
+      - name: Setup Android SDK (API 35)
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-35" > /dev/null
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMGR" ]; then
+            SDKMGR="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1)"
+          fi
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" "platforms;android-35" > /dev/null
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
