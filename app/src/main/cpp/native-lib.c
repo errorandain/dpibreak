@@ -2,6 +2,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <stdlib.h>
 
 // Объявляем main() из byedpi/main.c
 extern int main(int argc, char *argv[]);
