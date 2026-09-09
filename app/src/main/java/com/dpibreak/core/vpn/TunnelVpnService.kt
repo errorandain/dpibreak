@@ -98,7 +98,7 @@ class TunnelVpnService : VpnService() {
         Log.i(TAG, "TUN interface established successfully (fd=${fd.fd})")
         
         // Обновляем состояние в ServiceManager
-        ServiceManager.updateState(ServiceManager.ServiceState.Active)
+        ServiceManager.updateState(ServiceState.Active)
         
         // TODO(Задача 4): engine.start(strategy.byedpiArgs)
         // TODO(Задача 5): TunSocksBridge.start(fd.fd, port)
@@ -115,14 +115,14 @@ class TunnelVpnService : VpnService() {
         Log.i(TAG, "Tunnel stopped")
         
         // Обновляем состояние в ServiceManager
-        ServiceManager.updateState(ServiceManager.ServiceState.Idle)
+        ServiceManager.updateState(ServiceState.Idle)
     }
 
     override fun onRevoke() {
         // Пользователь отозвал разрешение VPN из системных настроек
         Log.w(TAG, "VPN permission revoked by user")
         stopTunnel()
-        ServiceManager.updateState(ServiceManager.ServiceState.Idle)
+        ServiceManager.updateState(ServiceState.Idle)
     }
 
     override fun onDestroy() {
