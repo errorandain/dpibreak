@@ -12,6 +12,11 @@ import com.dpibreak.MainActivity
 import com.dpibreak.core.NotificationUtils
 import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
+import com.dpibreak.core.engine.ByedpiJniEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 private const val TAG = "DPIBreak"
 
@@ -38,6 +43,8 @@ private const val TAG = "DPIBreak"
 class TunnelVpnService : VpnService() {
 
     private var tunInterface: ParcelFileDescriptor? = null
+    private val engine = ByedpiJniEngine()
+    private var engineJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -86,6 +93,7 @@ class TunnelVpnService : VpnService() {
             .addRoute("0.0.0.0", 0)              // весь IPv4-трафик
             .addDnsServer("1.1.1.1")             // TODO(Задача 7): DoH
             .setMtu(1500)
+            .addDisallowedApplication(packageName) // Исключаем своё приложение из TUN (защита от петли)
             // TODO(Задача 9): addDisallowedApplication(pkg) для per-app исключений
             .establish() ?: run { 
                 Log.e(TAG, "Failed to establish TUN interface")
@@ -97,15 +105,30 @@ class TunnelVpnService : VpnService() {
         tunInterface = fd
         Log.i(TAG, "TUN interface established successfully (fd=${fd.fd})")
         
-        // Обновляем состояние в ServiceManager
-        ServiceManager.updateState(ServiceState.Active)
-        
-        // TODO(Задача 4): engine.start(strategy.byedpiArgs)
-        // TODO(Задача 5): TunSocksBridge.start(fd.fd, port)
+        // Запускаем движок byedpi в фоновой корутине
+        engineJob = CoroutineScope(Dispatchers.IO).launch {
+            val port = engine.start(emptyList())
+            if (port == null) {
+                Log.e(TAG, "Failed to start byedpi engine")
+                ServiceManager.updateState(ServiceState.Error("Failed to start proxy"))
+                stopSelf()
+            } else {
+                Log.i(TAG, "byedpi engine started on port $port")
+                ServiceManager.updateState(ServiceState.Active)
+                
+                // TODO(Задача 5): TunSocksBridge.start(fd.fd, port)
+            }
+        }
     }
 
     private fun stopTunnel() {
         Log.d(TAG, "Stopping tunnel...")
+        
+        // Останавливаем движок перед закрытием TUN
+        engine.stop()
+        engineJob?.cancel()
+        engineJob = null
+        
         // TODO(Задача 5): TunSocksBridge.stop()
         // TODO(Задача 4): engine.stop()
         tunInterface?.close()
