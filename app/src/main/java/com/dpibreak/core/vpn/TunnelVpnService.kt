@@ -89,7 +89,7 @@ class TunnelVpnService : VpnService() {
             // TODO(Задача 9): addDisallowedApplication(pkg) для per-app исключений
             .establish() ?: run { 
                 Log.e(TAG, "Failed to establish TUN interface")
-                ServiceManager.updateState(ServiceManager.ServiceState.Error("Failed to establish TUN"))
+                ServiceManager.updateState(ServiceState.Error("Failed to establish TUN"))
                 stopSelf()
                 return 
             }
