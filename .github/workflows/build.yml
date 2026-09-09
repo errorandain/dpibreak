@@ -29,12 +29,28 @@ jobs:
       # (на облачных серверах GitHub Android SDK есть, но не со всеми версиями)
       - name: Setup Android SDK (API 35)
         run: |
-          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMGR" ]; then
-            SDKMGR="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1)"
+          # Определяем путь к sdkmanager
+          if [ -n "$ANDROID_HOME" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -n "$ANDROID_HOME" ]; then
+            SDKMGR="$(find "$ANDROID_HOME" -name "sdkmanager" -type f 2>/dev/null | head -n1)"
           fi
+          
+          # Если sdkmanager не найден — устанавливаем cmdline-tools
+          if [ -z "$SDKMGR" ] || [ ! -x "$SDKMGR" ]; then
+            echo "sdkmanager not found, installing cmdline-tools..."
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            cd "$ANDROID_HOME/cmdline-tools"
+            curl -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q cmdline-tools.zip
+            mv cmdline-tools latest
+            rm cmdline-tools.zip
+            SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          
+          echo "Using sdkmanager: $SDKMGR"
           yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
-          "$SDKMGR" "platforms;android-35" > /dev/null
+          "$SDKMGR" "platforms;android-35" "build-tools;35.0.0" > /dev/null
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
