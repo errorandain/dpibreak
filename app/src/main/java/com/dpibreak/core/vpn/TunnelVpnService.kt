@@ -9,9 +9,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import com.dpibreak.MainActivity
-import com.dpibreak.core.NotificationUtils
-import com.dpibreak.core.ServiceManager
-import com.dpibreak.core.ServiceState
+import com.dpibreak.core.*
 
 private const val TAG = "DPIBreak"
 
