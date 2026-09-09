@@ -52,7 +52,6 @@ class ByedpiJniEngine : DesyncEngine {
         while (System.currentTimeMillis() - startTime < timeoutMs) {
             try {
                 Socket().use { socket ->
-                    socket.connectTimeout = 500
                     socket.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
                 }
                 Log.d(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
