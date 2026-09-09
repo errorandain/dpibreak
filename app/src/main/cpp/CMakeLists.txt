@@ -35,6 +35,9 @@ target_compile_options(byedpi PRIVATE
     -Wno-unused-parameter
     -Wno-gnu-zero-variadic-macro-arguments
     -Wno-unused-function
+    -Wno-unknown-attributes
+    -Wno-format
+    -Wno-sign-compare
     -pedantic
 )
 
