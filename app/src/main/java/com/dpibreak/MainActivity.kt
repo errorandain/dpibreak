@@ -1,7 +1,9 @@
 package com.dpibreak
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -19,6 +21,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
+import com.dpibreak.core.vpn.TunnelVpnService
 
 /**
  * Главный экран.
@@ -29,6 +32,13 @@ import com.dpibreak.core.ServiceState
  * TODO(Задача 9): экран логов, per-app исключения.
  */
 class MainActivity : ComponentActivity() {
+
+    private val vpnPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        // Пользователь дал или отклонил разрешение VPN
+        // В любом случае продолжаем: если отклонил — сервис не запустится, onRevoke не вызовется
+    }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -57,21 +67,24 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                MainScreen()
+                MainScreen(this)
             }
         }
     }
 }
 
 @Composable
-fun MainScreen() {
+fun MainScreen(activity: MainActivity) {
     val serviceState by ServiceManager.state.collectAsStateWithLifecycle()
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = activity
 
     val isActive = when (serviceState) {
         is ServiceState.Active -> true
         else -> false
     }
+
+    // Защита от двойного клика: если статус Starting, кнопка неактивна
+    val isButtonEnabled = serviceState !is ServiceState.Starting
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -92,8 +105,18 @@ fun MainScreen() {
             )
             Spacer(modifier = Modifier.height(16.dp))
             Button(
-                onClick = { ServiceManager.toggle(context) },
-                enabled = serviceState !is ServiceState.Starting
+                onClick = {
+                    // Запрос разрешения VPN через VpnService.prepare()
+                    val prepareIntent = VpnService.prepare(context)
+                    if (prepareIntent != null) {
+                        // Требуется подтверждение пользователя
+                        activity.vpnPermissionLauncher.launch(prepareIntent)
+                    } else {
+                        // Разрешение уже есть — запускаем сервис
+                        ServiceManager.toggle(context)
+                    }
+                },
+                enabled = isButtonEnabled
             ) {
                 Text(
                     if (isActive) stringResource(R.string.btn_stop)

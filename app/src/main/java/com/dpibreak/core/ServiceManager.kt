@@ -80,6 +80,18 @@ object ServiceManager {
     }
 
     /**
+     * Обновляет состояние сервиса (вызывается из сервиса при смене статуса).
+     */
+    fun updateState(newState: ServiceState) {
+        if (newState is ServiceState.Idle || newState is ServiceState.Error) {
+            isServiceRunning = false
+        } else if (newState is ServiceState.Active) {
+            isServiceRunning = true
+        }
+        _state.value = newState
+    }
+
+    /**
      * Сбрасывает состояние в Idle (например, после onRevoke).
      */
     fun resetToIdle() {

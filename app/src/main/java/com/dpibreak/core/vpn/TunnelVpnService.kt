@@ -6,10 +6,13 @@ import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import androidx.core.app.ServiceCompat
 import com.dpibreak.MainActivity
 import com.dpibreak.core.NotificationUtils
 import com.dpibreak.core.ServiceManager
+
+private const val TAG = "DPIBreak"
 
 /**
  * Локальный VPN-сервис: поднимает TUN-интерфейс и заводит весь трафик
@@ -74,41 +77,51 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun startTunnel() {
-        // TODO(Задача 3): Builder + establish():
-        //
-        // val fd = Builder()
-        //     .setSession("DPIBreak")
-        //     .addAddress("10.111.0.2", 32)
-        //     .addRoute("0.0.0.0", 0)              // весь IPv4-трафик
-        //     .addDnsServer("1.1.1.1")             // TODO(Задача 7): DoH
-        //     .setMtu(1500)
-        //     // TODO(Задача 9): addDisallowedApplication(pkg) для per-app исключений
-        //     .establish() ?: run { stopSelf(); return }
-        //
-        // tunInterface = fd
-        // TODO(Задача 4): engine.start(strategy.byedpiArgs)
-        // TODO(Задача 5): TunSocksBridge.start(fd.fd, port)
+        Log.d(TAG, "Starting tunnel...")
+        
+        val fd = Builder()
+            .setSession("DPIBreak")
+            .addAddress("10.111.0.2", 32)
+            .addRoute("0.0.0.0", 0)              // весь IPv4-трафик
+            .addDnsServer("1.1.1.1")             // TODO(Задача 7): DoH
+            .setMtu(1500)
+            // TODO(Задача 9): addDisallowedApplication(pkg) для per-app исключений
+            .establish() ?: run { 
+                Log.e(TAG, "Failed to establish TUN interface")
+                ServiceManager.updateState(ServiceManager.ServiceState.Error("Failed to establish TUN"))
+                stopSelf()
+                return 
+            }
+        
+        tunInterface = fd
+        Log.i(TAG, "TUN interface established successfully (fd=${fd.fd})")
         
         // Обновляем состояние в ServiceManager
-        ServiceManager.resetToIdle() // Пока заглушка, реальное состояние будет в Задаче 3-5
+        ServiceManager.updateState(ServiceManager.ServiceState.Active)
+        
+        // TODO(Задача 4): engine.start(strategy.byedpiArgs)
+        // TODO(Задача 5): TunSocksBridge.start(fd.fd, port)
     }
 
     private fun stopTunnel() {
+        Log.d(TAG, "Stopping tunnel...")
         // TODO(Задача 5): TunSocksBridge.stop()
         // TODO(Задача 4): engine.stop()
         tunInterface?.close()
         tunInterface = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+        Log.i(TAG, "Tunnel stopped")
         
         // Обновляем состояние в ServiceManager
-        ServiceManager.resetToIdle()
+        ServiceManager.updateState(ServiceManager.ServiceState.Idle)
     }
 
     override fun onRevoke() {
         // Пользователь отозвал разрешение VPN из системных настроек
+        Log.w(TAG, "VPN permission revoked by user")
         stopTunnel()
-        ServiceManager.resetToIdle()
+        ServiceManager.updateState(ServiceManager.ServiceState.Idle)
     }
 
     override fun onDestroy() {
