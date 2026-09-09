@@ -51,13 +51,13 @@ class ByedpiJniEngine : DesyncEngine {
         
         while (System.currentTimeMillis() - startTime < timeoutMs) {
             try {
-                Socket().use { socket ->
-                    socket.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
-                }
+                val socket = Socket()
+                socket.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
+                socket.close()
                 Log.d(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
                 _isRunning.value = true
                 return DEFAULT_SOCKS_PORT
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Порт ещё не открыт, ждём
                 Thread.sleep(100)
             }
