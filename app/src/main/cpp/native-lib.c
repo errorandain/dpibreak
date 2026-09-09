@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <stdlib.h>
 
 /*
  * Заглушка JNI-библиотеки.
