@@ -1,6 +1,7 @@
 package com.dpibreak.core.vpn
 
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.VpnService
@@ -13,70 +14,68 @@ import com.dpibreak.core.NotificationUtils
 import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
 import com.dpibreak.core.engine.ByedpiJniEngine
+import com.dpibreak.core.tunnel.TunSocksBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "DPIBreak"
 
 /**
- * Локальный VPN-сервис: поднимает TUN-интерфейс и заводит весь трафик
- * в движок десинка. Ничего не отправляет на удалённые серверы.
+ * VPN-сервис: собирает конвейер обхода.
  *
- * ПОРЯДОК ЗАПУСКА (реализуется по задачам 3→4→5):
- *   1. startForeground() — уведомление (иначе система убьёт сервис)
- *   2. Builder → establish() — получить fd TUN-интерфейса
- *   3. DesyncEngine.start(strategy) — локальный SOCKS5 на 127.0.0.1:1080
- *   4. TunSocksBridge.start(tunFd, socksPort) — TUN → SOCKS5
+ *   приложения → TUN-интерфейс → tun2socks (hev-socks5-tunnel, vendored)
+ *   → SOCKS5 (byedpi, vendored) → интернет с десинхронизацией DPI.
  *
- * КЛЮЧЕВЫЕ ПРАВИЛА:
- *   • ИСХОДЯЩИЕ сокеты движка/туннеля обязательно пропускать через
- *     protect(socket) — иначе они уйдут обратно в TUN (петля!).
- *   • DNS: адрес в Builder → резолвинг через движок/DoH, иначе ТСПУ может
- *     подменять ответы DNS (см. docs/DPI-TECHNIQUES.md, раздел DNS).
- *   • IPv6: либо полноценно обрабатывать, либо не маршрутизировать v6 в Builder
- *     (addRoute только 0.0.0.0/0), иначе «включено, но не работает».
- *   • QUIC: YouTube по UDP/443 обходит TCP-трюки — UDP 443 блокируется
- *     (см. Задача 7).
+ * Порядок запуска: TUN → движок byedpi → tun2socks.
+ * Порядок остановки — обратный, на фоновом потоке, с защитой от повторного
+ * входа: некорректная последовательность остановки вызывала вылет приложения
+ * (двойное закрытие сокета движка и блокировка главного потока).
  */
 class TunnelVpnService : VpnService() {
 
     private var tunInterface: ParcelFileDescriptor? = null
     private val engine = ByedpiJniEngine()
-    private var engineJob: Job? = null
+    private var healthJob: Job? = null
+
+    /** Все фоновые работы сервиса. */
+    private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
+
+    /** Защита от повторного входа в остановку (кнопка + onDestroy + onRevoke). */
+    private val stopping = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate()
-        // TODO(Задача 3): startForeground с уведомлением из NotificationUtils
         NotificationUtils.createNotificationChannel(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                startForegroundService()
-                startTunnel()
+                startInForeground()
+                if (stopping.get()) {
+                    Log.w(TAG, "Start requested while stopping — ignoring")
+                    return START_STICKY
+                }
+                serviceScope.launch { startTunnel() }
             }
-            ACTION_STOP -> stopTunnel()
+            ACTION_STOP -> {
+                serviceScope.launch { stopTunnel() }
+            }
         }
         return START_STICKY
     }
 
-    /**
-     * Запускает foreground-режим с уведомлением.
-     * На Android 14+ (API 34+) требуется указать FOREGROUND_SERVICE_TYPE_SPECIAL_USE.
-     */
-    private fun startForegroundService() {
-        val pendingIntent = TunnelVpnService.contentIntent(this)
+    private fun startInForeground() {
+        val pendingIntent = contentIntent(this)
         val notification = NotificationUtils.createNotification(this, pendingIntent)
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // API 34+: требуется указать тип foreground-сервиса
+            // Android 14+: тип foreground-сервиса обязателен (specialUse — в манифесте)
             ServiceCompat.startForeground(
-                this,
-                NotificationUtils.NOTIFICATION_ID,
-                notification,
+                this, NotificationUtils.NOTIFICATION_ID, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             )
         } else {
@@ -84,72 +83,128 @@ class TunnelVpnService : VpnService() {
         }
     }
 
+    /**
+     * Поднимает весь конвейер (вызывается на Dispatchers.IO).
+     * О любой ошибке сообщает через [ServiceManager.updateState] — текст
+     * виден на главном экране приложения и сильно упрощает диагностику.
+     */
     private fun startTunnel() {
-        Log.d(TAG, "Starting tunnel...")
-        
+        if (tunInterface != null) {
+            Log.w(TAG, "Tunnel already running")
+            return
+        }
+        Log.i(TAG, "Starting tunnel pipeline…")
+
+        // 1. TUN-интерфейс через VpnService.Builder (без root).
+        //    Настройки повторяют проверенный эталон (ByeByeDPI):
+        //    адрес /32, маршрут по умолчанию, DNS, своё приложение исключено.
+        //    MTU интерфейса не задаём: туннель работает со значением по умолчанию.
         val fd = Builder()
             .setSession("DPIBreak")
             .addAddress("10.111.0.2", 32)
-            .addRoute("0.0.0.0", 0)              // весь IPv4-трафик
-            .addDnsServer("1.1.1.1")             // TODO(Задача 7): DoH
-            .setMtu(1500)
-            .addDisallowedApplication(packageName) // Исключаем своё приложение из TUN (защита от петли)
-            // TODO(Задача 9): addDisallowedApplication(pkg) для per-app исключений
-            .establish() ?: run { 
-                Log.e(TAG, "Failed to establish TUN interface")
-                ServiceManager.updateState(ServiceState.Error("Failed to establish TUN"))
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer("1.1.1.1")
+            .addDisallowedApplication(packageName)
+            .establish()
+            ?: run {
+                Log.e(TAG, "TUN establish failed (разрешение VPN отозвано?)")
+                ServiceManager.updateState(
+                    ServiceState.Error("Не удалось создать TUN-интерфейс (разрешение VPN?)")
+                )
                 stopSelf()
-                return 
+                return
             }
-        
         tunInterface = fd
-        Log.i(TAG, "TUN interface established successfully (fd=${fd.fd})")
-        
-        // Запускаем движок byedpi в фоновой корутине
-        engineJob = CoroutineScope(Dispatchers.IO).launch {
-            val port = engine.start(emptyList())
-            if (port == null) {
-                Log.e(TAG, "Failed to start byedpi engine")
-                ServiceManager.updateState(ServiceState.Error("Failed to start proxy"))
-                stopSelf()
-            } else {
-                Log.i(TAG, "byedpi engine started on port $port")
+        Log.i(TAG, "TUN established, fd=${fd.fd}")
+
+        // 2. Движок byedpi: локальный SOCKS5 на 127.0.0.1.
+        //    TODO(Задача 5): сюда подставляются аргументы выбранной стратегии.
+        val port = engine.start(listOf("-i", "127.0.0.1"))
+        if (port == null) {
+            Log.e(TAG, "byedpi engine failed to start")
+            ServiceManager.updateState(
+                ServiceState.Error("Движок byedpi не запустился (порт 1080 не открылся)")
+            )
+            cleanup(restoreIdle = false)
+            return
+        }
+        Log.i(TAG, "byedpi SOCKS5 listening on 127.0.0.1:$port")
+
+        // 3. tun2socks: TUN → SOCKS5.
+        val bridgeStarted = TunSocksBridge.start(fd.fd, cacheDir, "127.0.0.1", port)
+        if (!bridgeStarted) {
+            Log.e(TAG, "tun2socks bridge failed to start")
+            ServiceManager.updateState(
+                ServiceState.Error("Туннель tun2socks не запустился")
+            )
+            cleanup(restoreIdle = false)
+            return
+        }
+
+        // 4. Проверка здоровья: поток туннеля должен быть жив спустя секунду.
+        //    Если он умер — на экране появится конкретная ошибка вместо
+        //    молчаливого «нет интернета».
+        healthJob = serviceScope.launch {
+            delay(1000)
+            if (TunSocksBridge.TProxyIsRunning()) {
+                Log.i(TAG, "Pipeline is UP: TUN → byedpi:$port → tun2socks")
                 ServiceManager.updateState(ServiceState.Active)
-                
-                // TODO(Задача 5): TunSocksBridge.start(fd.fd, port)
+            } else {
+                Log.e(TAG, "tun2socks thread died right after start")
+                ServiceManager.updateState(
+                    ServiceState.Error("Туннель умер сразу после старта — нужен logcat (тег DPIBreak)")
+                )
+                stopTunnel()
             }
         }
     }
 
-    private fun stopTunnel() {
-        Log.d(TAG, "Stopping tunnel...")
-        
-        // Останавливаем движок перед закрытием TUN
-        engine.stop()
-        engineJob?.cancel()
-        engineJob = null
-        
-        // TODO(Задача 5): TunSocksBridge.stop()
-        // TODO(Задача 4): engine.stop()
-        tunInterface?.close()
-        tunInterface = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-        Log.i(TAG, "Tunnel stopped")
-        
-        // Обновляем состояние в ServiceManager
-        ServiceManager.updateState(ServiceState.Idle)
+    /**
+     * Штатная остановка: только через этот метод (фоновый поток + защита
+     * от повторного входа). Вызывается по кнопке, onRevoke и из проверок
+     * здоровья.
+     */
+    private suspend fun stopTunnel() {
+        if (!stopping.compareAndSet(false, true)) {
+            return // уже останавливаемся
+        }
+        cleanup(restoreIdle = true)
+        stopping.set(false)
     }
 
+    /**
+     * Разбор конвейера в обратном порядке. [restoreIdle]=false, если уже
+     * установлено состояние Error — не затираем текст ошибки.
+     */
+    private fun cleanup(restoreIdle: Boolean) {
+        Log.i(TAG, "Stopping tunnel…")
+        healthJob?.cancel()
+        healthJob = null
+        runCatching { TunSocksBridge.stop() }
+        runCatching { engine.stop() }
+        runCatching { tunInterface?.close() }
+        tunInterface = null
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        if (restoreIdle) {
+            ServiceManager.updateState(ServiceState.Idle)
+        }
+        Log.i(TAG, "Tunnel stopped")
+    }
+
+    /** Разрешение VPN отозвано пользователем из системных настроек. */
     override fun onRevoke() {
-        // Пользователь отозвал разрешение VPN из системных настроек
-        Log.w(TAG, "VPN permission revoked by user")
-        stopTunnel()
-        ServiceManager.updateState(ServiceState.Idle)
+        Log.w(TAG, "onRevoke: VPN permission revoked")
+        serviceScope.launch { stopTunnel() }
     }
 
     override fun onDestroy() {
-        stopTunnel()
+        // Если сервис убит системой без штатной остановки — прибираемся
+        // best-effort (обычный путь уже всё закрыл, операции идемпотентны).
+        if (tunInterface != null) {
+            Log.w(TAG, "onDestroy with active tunnel — emergency cleanup")
+            cleanup(restoreIdle = true)
+        }
         super.onDestroy()
     }
 
@@ -157,11 +212,11 @@ class TunnelVpnService : VpnService() {
         const val ACTION_START = "com.dpibreak.START"
         const val ACTION_STOP = "com.dpibreak.STOP"
 
-        /** PendingIntent для уведомления: вернуться в приложение. */
-        fun contentIntent(service: VpnService): PendingIntent =
+        /** PendingIntent: открыть приложение по нажатию на уведомление. */
+        fun contentIntent(context: Context): PendingIntent =
             PendingIntent.getActivity(
-                service, 0,
-                Intent(service, MainActivity::class.java),
+                context, 0,
+                Intent(context, MainActivity::class.java),
                 PendingIntent.FLAG_IMMUTABLE
             )
     }

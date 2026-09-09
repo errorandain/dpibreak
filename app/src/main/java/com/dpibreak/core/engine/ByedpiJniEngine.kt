@@ -1,20 +1,28 @@
 package com.dpibreak.core.engine
 
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.*
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetSocketAddress
 import java.net.Socket
 
 /**
  * Реализация [DesyncEngine] поверх C-ядра byedpi (https://github.com/hufrea/byedpi, MIT).
  *
- * Паттерн интеграции (проверенный сообществом):
- *  1. byedpi собирается NDK как static-библиотека и линкуется в libdpibreak.so;
- *  2. JNI-функция принимает массив строк-аргументов, конвертирует в char** и
- *     вызывает main(argc, argv) ядра — ядро стартует свой SOCKS5-сервер;
- *  3. остановка — shutdown(server_fd) (server_fd — глобальная переменная ядра).
+ * Интеграция: JNI-мост вызывает main(argc, argv) ядра в фоновом потоке —
+ * ядро поднимает SOCKS5-прокси на 127.0.0.1:[port] и работает до остановки.
+ *
+ * ВАЖНО (починено после бага с вылетом): после выхода main() сокет server_fd
+ * закрывается самим ядром. Поэтому stop() сначала просит ядро остановиться
+ * мягко (shutdown), ждёт завершения потока до 2 секунд, и только если поток
+ * завис — делает forceClose. Так мы не закрываем чужие дескрипторы.
  */
 class ByedpiJniEngine : DesyncEngine {
 
@@ -25,74 +33,84 @@ class ByedpiJniEngine : DesyncEngine {
 
         /** Порт локального SOCKS5 (совпадает с -p у byedpi). */
         const val DEFAULT_SOCKS_PORT = 1080
-        
+
         private const val TAG = "DPIBreak"
     }
 
     private val _isRunning = MutableStateFlow(false)
     override val isRunning: StateFlow<Boolean> = _isRunning
-    
+
     private var proxyJob: Job? = null
 
     override fun start(args: List<String>): Int? {
-        Log.d(TAG, "Starting byedpi proxy with args: $args")
-        
-        // Запускаем поток с jniStartProxy
-        proxyJob = CoroutineScope(Dispatchers.IO).launch {
-            val allArgs = listOf("-p", DEFAULT_SOCKS_PORT.toString()) + args
-            Log.d(TAG, "Full args: $allArgs")
-            val result = jniStartProxy(allArgs.toTypedArray())
-            Log.d(TAG, "byedpi main() returned: $result")
+        if (_isRunning.value) {
+            return DEFAULT_SOCKS_PORT
         }
-        
-        // Ждём открытия порта (~5 сек)
-        val timeoutMs = 5000L
-        val startTime = System.currentTimeMillis()
-        
-        while (System.currentTimeMillis() - startTime < timeoutMs) {
+
+        val allArgs = listOf("-p", DEFAULT_SOCKS_PORT.toString()) + args
+        Log.i(TAG, "Starting byedpi with args: $allArgs")
+
+        proxyJob = CoroutineScope(Dispatchers.IO).launch {
+            val rc = jniStartProxy(allArgs.toTypedArray())
+            _isRunning.value = false
+            Log.i(TAG, "byedpi main() exited with code $rc")
+        }
+
+        // Ждём открытия порта SOCKS5 (~5 сек)
+        val deadline = System.currentTimeMillis() + 5000
+        while (System.currentTimeMillis() < deadline) {
+            if (proxyJob?.isActive != true && !_isRunning.value) {
+                // main() завершился раньше, чем порт открылся — ошибка запуска
+                Log.e(TAG, "byedpi main() exited before opening port")
+                proxyJob = null
+                return null
+            }
             try {
-                val socket = Socket()
-                socket.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
-                socket.close()
-                Log.d(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
+                Socket().use { s ->
+                    s.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
+                }
+                Log.i(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
                 _isRunning.value = true
                 return DEFAULT_SOCKS_PORT
             } catch (_: Exception) {
-                // Порт ещё не открыт, ждём
                 Thread.sleep(100)
             }
         }
-        
-        Log.e(TAG, "Failed to open SOCKS5 port within $timeoutMs ms")
+
+        Log.e(TAG, "SOCKS5 port was not opened within 5 seconds")
         stop()
         return null
     }
 
     override fun stop() {
-        Log.d(TAG, "Stopping byedpi proxy")
-        try {
-            jniStopProxy()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping proxy: ${e.message}")
+        val job = proxyJob
+        if (job == null) {
+            _isRunning.value = false
+            return
         }
-        
-        // Принудительное закрытие при зависании
-        try {
-            Thread.sleep(500)
-            if (_isRunning.value) {
-                Log.w(TAG, "Proxy still running, force closing...")
-                jniForceClose()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error force closing: ${e.message}")
+
+        // 1. Мягкая остановка: shutdown(server_fd) внутри ядра
+        runCatching { jniStopProxy() }
+            .onFailure { Log.w(TAG, "jniStopProxy: ${it.message}") }
+
+        // 2. Ждём завершения потока ядра до 2 секунд
+        val finished = runBlocking {
+            withTimeoutOrNull(2000) { job.join(); true }
+        } == true
+
+        // 3. Только если завис — жёсткое закрытие
+        if (!finished) {
+            Log.w(TAG, "byedpi did not stop in 2s, force closing")
+            runCatching { jniForceClose() }
+            job.cancel()
         }
-        
-        proxyJob?.cancel()
+
         proxyJob = null
         _isRunning.value = false
+        Log.i(TAG, "byedpi engine stopped")
     }
 
     private external fun jniStartProxy(args: Array<String>): Int
-    private external fun jniStopProxy()
-    private external fun jniForceClose()
+    private external fun jniStopProxy(): Int
+    private external fun jniForceClose(): Int
 }

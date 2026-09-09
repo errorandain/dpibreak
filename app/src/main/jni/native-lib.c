@@ -9,12 +9,16 @@
  * DPIBreak: JNI-мост к ядру byedpi (https://github.com/hufrea/byedpi, MIT).
  *
  * Паттерн интеграции (проверенный сообществом — ByeByeDPI и др.):
- *  - jniStartProxy: Java-строки -> char** argv, сброс optind, вызов main(argc, argv)
+ *  - jniStartProxy: Java-строки -> char** argv (argv[0] = "byedpi" — имя
+ *    программы, как ожидает getopt), сброс optind, вызов main(argc, argv)
  *    ядра; main() блокирует до остановки — вызывать ТОЛЬКО из фонового потока;
  *  - jniStopProxy: мягкая остановка через shutdown(server_fd);
  *  - jniForceClose: жёсткое закрытие сокета при зависании.
  *
- * server_fd — глобальная переменная ядра (proxy.c).
+ * ЗАЩИТА ОТ ДВОЙНОГО ЗАКРЫТИЯ: после выхода main() сокет server_fd уже закрыт
+ * самим ядром byedpi, а номер дескриптора мог быть переиспользован другими
+ * сокетами приложения (туннеля!). Поэтому stop/forceClose работают с fd
+ * ТОЛЬКО когда движок ещё считается запущенным (g_proxy_running).
  */
 
 extern int server_fd;
@@ -30,20 +34,22 @@ Java_com_dpibreak_core_engine_ByedpiJniEngine_jniStartProxy(JNIEnv *env,
         return -1;
     }
 
-    jsize argc = (*env)->GetArrayLength(env, args);
+    jsize nargs = (*env)->GetArrayLength(env, args);
+    int argc = (int) nargs + 1; /* +1 под argv[0] */
     char **argv = calloc((size_t) argc + 1, sizeof(char *));
     if (!argv) {
         return -1;
     }
 
-    for (jsize i = 0; i < argc; i++) {
+    argv[0] = strdup("byedpi"); /* имя программы — для корректного разбора getopt */
+    for (jsize i = 0; i < nargs; i++) {
         jstring js = (jstring) (*env)->GetObjectArrayElement(env, args, i);
         if (!js) {
-            argv[i] = NULL;
+            argv[i + 1] = NULL;
             continue;
         }
         const char *utf = (*env)->GetStringUTFChars(env, js, 0);
-        argv[i] = utf ? strdup(utf) : NULL;
+        argv[i + 1] = utf ? strdup(utf) : NULL;
         if (utf) (*env)->ReleaseStringUTFChars(env, js, utf);
         (*env)->DeleteLocalRef(env, js);
     }
@@ -56,7 +62,7 @@ Java_com_dpibreak_core_engine_ByedpiJniEngine_jniStartProxy(JNIEnv *env,
 
     g_proxy_running = 0;
 
-    for (jsize i = 0; i < argc; i++) {
+    for (int i = 0; i < argc; i++) {
         free(argv[i]);
     }
     free(argv);
@@ -64,23 +70,26 @@ Java_com_dpibreak_core_engine_ByedpiJniEngine_jniStartProxy(JNIEnv *env,
     return rc;
 }
 
+/* Мягкая остановка: shutdown выводит main() из цикла событий. Безопасна повторно. */
 JNIEXPORT jint JNICALL
 Java_com_dpibreak_core_engine_ByedpiJniEngine_jniStopProxy(
         __attribute__((unused)) JNIEnv *env,
         __attribute__((unused)) jobject thiz) {
 
     if (!g_proxy_running) {
-        return -1;
+        return -1; /* уже остановлен — fd мог быть переиспользован, не трогаем */
     }
-    /* Мягкая остановка: событие выхода из event loop ядра */
     return shutdown(server_fd, SHUT_RDWR);
 }
 
+/* Жёсткое закрытие — только если main() завис, но формально ещё «работает». */
 JNIEXPORT jint JNICALL
 Java_com_dpibreak_core_engine_ByedpiJniEngine_jniForceClose(
         __attribute__((unused)) JNIEnv *env,
         __attribute__((unused)) jobject thiz) {
 
-    /* Жёсткое закрытие сокета — на случай зависания */
+    if (!g_proxy_running) {
+        return -1; /* main() уже закрыл server_fd сам */
+    }
     return close(server_fd);
 }
