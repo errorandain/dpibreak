@@ -33,6 +33,8 @@ target_compile_options(byedpi PRIVATE
     -Wno-unused
     -Wextra
     -Wno-unused-parameter
+    -Wno-gnu-zero-variadic-macro-arguments
+    -Wno-unused-function
     -pedantic
 )
 
