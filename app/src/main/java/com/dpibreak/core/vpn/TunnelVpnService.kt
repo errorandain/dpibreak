@@ -2,9 +2,14 @@ package com.dpibreak.core.vpn
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import androidx.core.app.ServiceCompat
 import com.dpibreak.MainActivity
+import com.dpibreak.core.NotificationUtils
+import com.dpibreak.core.ServiceManager
 
 /**
  * Локальный VPN-сервис: поднимает TUN-интерфейс и заводит весь трафик
@@ -33,14 +38,39 @@ class TunnelVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         // TODO(Задача 3): startForeground с уведомлением из NotificationUtils
+        NotificationUtils.createNotificationChannel(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startTunnel()
+            ACTION_START -> {
+                startTunnel()
+                startForegroundService()
+            }
             ACTION_STOP -> stopTunnel()
         }
         return START_STICKY
+    }
+
+    /**
+     * Запускает foreground-режим с уведомлением.
+     * На Android 14+ (API 34+) требуется указать FOREGROUND_SERVICE_TYPE_SPECIAL_USE.
+     */
+    private fun startForegroundService() {
+        val pendingIntent = TunnelVpnService.contentIntent(this)
+        val notification = NotificationUtils.createNotification(this, pendingIntent)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // API 34+: требуется указать тип foreground-сервиса
+            ServiceCompat.startForeground(
+                this,
+                NotificationUtils.NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NotificationUtils.NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startTunnel() {
@@ -58,6 +88,9 @@ class TunnelVpnService : VpnService() {
         // tunInterface = fd
         // TODO(Задача 4): engine.start(strategy.byedpiArgs)
         // TODO(Задача 5): TunSocksBridge.start(fd.fd, port)
+        
+        // Обновляем состояние в ServiceManager
+        ServiceManager.resetToIdle() // Пока заглушка, реальное состояние будет в Задаче 3-5
     }
 
     private fun stopTunnel() {
@@ -65,12 +98,17 @@ class TunnelVpnService : VpnService() {
         // TODO(Задача 4): engine.stop()
         tunInterface?.close()
         tunInterface = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+        
+        // Обновляем состояние в ServiceManager
+        ServiceManager.resetToIdle()
     }
 
     override fun onRevoke() {
         // Пользователь отозвал разрешение VPN из системных настроек
         stopTunnel()
+        ServiceManager.resetToIdle()
     }
 
     override fun onDestroy() {
