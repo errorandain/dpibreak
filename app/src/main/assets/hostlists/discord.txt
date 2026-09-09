@@ -1,0 +1,8 @@
+# Discord: домены.
+discord.com
+discord.gg
+discordapp.com
+discordapp.net
+discord.media
+discordcdn.com
+discordsays.com

@@ -1,0 +1,26 @@
+# Общий пресет: объединение списков YouTube + Discord + Telegram.
+youtube.com
+www.youtube.com
+m.youtube.com
+music.youtube.com
+youtubei.googleapis.com
+googlevideo.com
+www.googlevideo.com
+ytimg.com
+i.ytimg.com
+ggpht.com
+yt3.ggpht.com
+discord.com
+discord.gg
+discordapp.com
+discordapp.net
+discord.media
+discordcdn.com
+discordsays.com
+telegram.org
+api.telegram.org
+t.me
+telegram.me
+telesco.pe
+cdn.telesco.pe
+cdn1.telesco.pe

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DPIBreak</string>
+    <string name="vpn_notification_channel">Туннель DPIBreak</string>
+    <string name="vpn_notification_title">DPIBreak активен</string>
+    <string name="vpn_notification_text">Обход DPI включён</string>
+    <string name="btn_start">Включить обход</string>
+    <string name="btn_stop">Выключить обход</string>
+    <string name="status_idle">Обход выключен</string>
+    <string name="status_active">Обход работает</string>
+</resources>

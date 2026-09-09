@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Минимальная тема: UI полностью на Jetpack Compose -->
+    <style name="Theme.DPIBreak" parent="android:Theme.Material.NoActionBar" />
+</resources>

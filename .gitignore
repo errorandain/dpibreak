@@ -1,0 +1,27 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Локальные конфиги
+local.properties
+
+# Подписи (НИКОГДА не коммитить релизные ключи!)
+*.keystore
+*.jks
+!debug.keystore
+
+# Артефакты
+*.apk
+*.aab
+
+# ОС
+.DS_Store
+Thumbs.db
