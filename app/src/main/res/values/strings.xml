@@ -7,5 +7,8 @@
     <string name="btn_start">Включить обход</string>
     <string name="btn_stop">Выключить обход</string>
     <string name="status_idle">Обход выключен</string>
+    <string name="status_starting">Запуск…</string>
     <string name="status_active">Обход работает</string>
+    <string name="preset_picker_title">Режим обхода:</string>
+    <string name="preset_locked_hint">(выключите обход, чтобы сменить режим)</string>
 </resources>

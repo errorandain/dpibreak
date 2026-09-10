@@ -16,7 +16,9 @@ android {
         versionName = "0.1.0"
 
         ndk {
-            // TODO(Задача 4): уточнить ABI после подключения byedpi (arm64 — основной)
+            // Список ABI должен совпадать с APP_ABI в app/src/main/jni/Application.mk
+            // (иначе Gradle отфильтрует собранную .so и на устройстве будет
+            // UnsatisfiedLinkError). arm64-v8a — основной, x86_64 — эмулятор.
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
     }

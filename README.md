@@ -3,7 +3,7 @@
 > Локальный обход DPI-блокировок (YouTube, Discord, Telegram) на Android **без root**.
 > Мобильный аналог zapret / GoodbyeDPI: весь трафик обрабатывается **на устройстве**, без внешних серверов, без аккаунтов и логов.
 
-![status](https://img.shields.io/badge/статус-каркас_разработки-orange)
+![status](https://img.shields.io/badge/статус-альфа:_туннель_работает-yellowgreen)
 ![platform](https://img.shields.io/badge/platform-Android%206.0%2B-green)
 ![root](https://img.shields.io/badge/root-не_требуется-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
@@ -12,8 +12,13 @@
 
 ## ⚠️ Статус проекта
 
-Репозиторий — **структурированный каркас в активной разработке** (см. [Roadmap](docs/ROADMAP.md)).
-Дорожная карта разработки и пошаговые задачи — в [`docs/qwen/TASKS.md`](docs/qwen/TASKS.md).
+Каркас собран и **рабочий конвейер уже запущен**: TUN → tun2socks → byedpi поднимается
+на реальном телефоне, YouTube и Discord обходятся (см. статус вех в [Roadmap](docs/ROADMAP.md)).
+Дорожная карта и пошаговые задачи — в [`docs/qwen/TASKS.md`](docs/qwen/TASKS.md).
+
+Уже готово: foreground-VPN-сервис без root, JNI-мост к ядру byedpi, мост tun2socks,
+7 пресетов обхода с выбором в UI. В работе: передача hostlists (`-H`), блокировка QUIC,
+DoH, экран логов, per-app исключения.
 
 ## Как это работает
 
@@ -50,10 +55,12 @@
 
 ## Сборка
 
-Требования: JDK 17, Android SDK (API 35), Android NDK, CMake 3.22+.
+Требования: JDK 17, Android SDK (API 35), Android NDK.
+CMake не нужен — нативная часть собирается через **ndk-build** (`app/src/main/jni/Android.mk`).
+Зависимости byedpi и hev-socks5-tunnel лежат в репозитории (vendored), клонировать сабмодули не нужно.
 
 ```bash
-git clone --recurse-submodules https://github.com/<ваш-логин>/dpibreak.git
+git clone https://github.com/<ваш-логин>/dpibreak.git
 cd dpibreak
 ./gradlew assembleDebug
 # APK: app/build/outputs/apk/debug/app-debug.apk
@@ -80,7 +87,7 @@ dpibreak/
 │       │   │   └── vpn/                # VpnService: TUN-интерфейс, foreground-сервис
 │       │   └── domain/                 # модели: стратегии, пресеты, режимы
 │       ├── assets/hostlists/           # списки доменов YouTube / Discord / Telegram
-│       ├── cpp/                        # нативная часть (NDK): byedpi + обвязка
+│       ├── jni/                        # нативная часть (ndk-build): native-lib.c + vendored byedpi и hev-socks5-tunnel
 │       └── res/                        # ресурсы, иконка, строки
 ├── docs/
 │   ├── ARCHITECTURE.md                 # архитектура приложения
@@ -97,9 +104,9 @@ dpibreak/
 
 ## Дорожная карта
 
-- [ ] **M1** — VPN-сервис поднимает TUN, вкл/выкл из UI
-- [ ] **M2** — сквозной трафик: byedpi + hev-socks5-tunnel, сайты открываются
-- [ ] **M3** — пресеты YouTube/Discord/Telegram, hostlists, выбор стратегии
+- [x] **M1** — VPN-сервис поднимает TUN, вкл/выкл из UI
+- [x] **M2** — сквозной трафик: byedpi + hev-socks5-tunnel, сайты открываются
+- [ ] **M3** *(в работе)* — пресеты готовы; hostlists, QUIC, DoH — в процессе
 - [ ] **M4** — per-app исключения, DoH, блокировка QUIC, quick-tile, автозапуск
 - [ ] **M5** — релиз: подписанные APK, GitHub Releases, публичный анонс
 

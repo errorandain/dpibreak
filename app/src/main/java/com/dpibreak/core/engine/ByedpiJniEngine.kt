@@ -1,28 +1,28 @@
 package com.dpibreak.core.engine
 
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.asStateFlow
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 
 /**
  * Реализация [DesyncEngine] поверх C-ядра byedpi (https://github.com/hufrea/byedpi, MIT).
  *
- * Интеграция: JNI-мост вызывает main(argc, argv) ядра в фоновом потоке —
+ * Интеграция: JNI-мост вызывает main(argc, argv) ядра в отдельном потоке —
  * ядро поднимает SOCKS5-прокси на 127.0.0.1:[port] и работает до остановки.
  *
  * ВАЖНО (починено после бага с вылетом): после выхода main() сокет server_fd
  * закрывается самим ядром. Поэтому stop() сначала просит ядро остановиться
- * мягко (shutdown), ждёт завершения потока до 2 секунд, и только если поток
- * завис — делает forceClose. Так мы не закрываем чужие дескрипторы.
+ * мягко (shutdown), ждёт завершения потока, и только если поток завис — делает
+ * forceClose. Так мы не закрываем чужие дескрипторы.
+ *
+ * Поток — «родной» [Thread], а не корутина: main() ядра блокирует поток до
+ * остановки, отменить такую корутину нельзя (job.cancel() не прерывает нативный
+ * вызов), а отложенный корутинами пул только создаёт иллюзию отмены. Поток —
+ * daemon, поэтому зависшее ядро не удержит процесс от завершения.
  */
 class ByedpiJniEngine : DesyncEngine {
 
@@ -34,35 +34,62 @@ class ByedpiJniEngine : DesyncEngine {
         /** Порт локального SOCKS5 (совпадает с -p у byedpi). */
         const val DEFAULT_SOCKS_PORT = 1080
 
+        /** Сколько ждём открытия порта SOCKS5. */
+        private const val PORT_WAIT_MS = 5_000L
+
+        /** Сколько ждём мягкого завершения потока ядра. */
+        private const val SOFT_STOP_WAIT_MS = 2_000L
+
+        /** Сколько дополнительно ждём после жёсткого закрытия. */
+        private const val HARD_STOP_WAIT_MS = 500L
+
         private const val TAG = "DPIBreak"
     }
 
     private val _isRunning = MutableStateFlow(false)
-    override val isRunning: StateFlow<Boolean> = _isRunning
+    override val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
-    private var proxyJob: Job? = null
+    /** Поток, в котором работает main() ядра. Не null — пока поток не завершён. */
+    @Volatile private var coreThread: Thread? = null
 
+    /**
+     * {@inheritDoc}
+     *
+     * Метод блокирующий (ожидает порт) — вызывать только из фонового потока.
+     */
     override fun start(args: List<String>): Int? {
         if (_isRunning.value) {
             return DEFAULT_SOCKS_PORT
         }
+        // Поток прошлого запуска ещё жив (ядро не отреагировало на остановку) —
+        // новый main() поднимать нельзя: нативная сторона вернёт ошибку.
+        coreThread?.takeIf { it.isAlive }?.let {
+            Log.e(TAG, "Previous byedpi thread is still alive — cannot start a new one")
+            return null
+        }
+        coreThread = null
 
         val allArgs = listOf("-p", DEFAULT_SOCKS_PORT.toString()) + args
         Log.i(TAG, "Starting byedpi with args: $allArgs")
 
-        proxyJob = CoroutineScope(Dispatchers.IO).launch {
+        val thread = Thread {
             val rc = jniStartProxy(allArgs.toTypedArray())
             _isRunning.value = false
             Log.i(TAG, "byedpi main() exited with code $rc")
         }
+        thread.name = "byedpi-core"
+        thread.isDaemon = true
+        coreThread = thread
+        thread.start()
 
-        // Ждём открытия порта SOCKS5 (~5 сек)
-        val deadline = System.currentTimeMillis() + 5000
+        // Ждём открытия порта SOCKS5
+        val deadline = System.currentTimeMillis() + PORT_WAIT_MS
         while (System.currentTimeMillis() < deadline) {
-            if (proxyJob?.isActive != true && !_isRunning.value) {
+            if (!thread.isAlive) {
                 // main() завершился раньше, чем порт открылся — ошибка запуска
                 Log.e(TAG, "byedpi main() exited before opening port")
-                proxyJob = null
+                coreThread = null
+                _isRunning.value = false
                 return null
             }
             try {
@@ -72,19 +99,19 @@ class ByedpiJniEngine : DesyncEngine {
                 Log.i(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
                 _isRunning.value = true
                 return DEFAULT_SOCKS_PORT
-            } catch (_: Exception) {
+            } catch (_: IOException) {
                 Thread.sleep(100)
             }
         }
 
-        Log.e(TAG, "SOCKS5 port was not opened within 5 seconds")
+        Log.e(TAG, "SOCKS5 port was not opened within ${PORT_WAIT_MS / 1000} seconds")
         stop()
         return null
     }
 
     override fun stop() {
-        val job = proxyJob
-        if (job == null) {
+        val thread = coreThread
+        if (thread == null) {
             _isRunning.value = false
             return
         }
@@ -93,19 +120,22 @@ class ByedpiJniEngine : DesyncEngine {
         runCatching { jniStopProxy() }
             .onFailure { Log.w(TAG, "jniStopProxy: ${it.message}") }
 
-        // 2. Ждём завершения потока ядра до 2 секунд
-        val finished = runBlocking {
-            withTimeoutOrNull(2000) { job.join(); true }
-        } == true
-
-        // 3. Только если завис — жёсткое закрытие
-        if (!finished) {
-            Log.w(TAG, "byedpi did not stop in 2s, force closing")
-            runCatching { jniForceClose() }
-            job.cancel()
+        // 2. Ждём завершения потока ядра (сам себя джойнить нельзя)
+        if (thread !== Thread.currentThread()) {
+            runCatching { thread.join(SOFT_STOP_WAIT_MS) }
+                .onFailure { Log.w(TAG, "join byedpi-core: ${it.message}") }
         }
 
-        proxyJob = null
+        // 3. Только если завис — жёсткое закрытие
+        if (thread.isAlive) {
+            Log.w(TAG, "byedpi did not stop in ${SOFT_STOP_WAIT_MS} ms, force closing")
+            runCatching { jniForceClose() }
+            runCatching { thread.join(HARD_STOP_WAIT_MS) }
+        }
+
+        if (!thread.isAlive) {
+            coreThread = null
+        }
         _isRunning.value = false
         Log.i(TAG, "byedpi engine stopped")
     }
