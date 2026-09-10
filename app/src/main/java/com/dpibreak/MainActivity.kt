@@ -1,7 +1,7 @@
 package com.dpibreak
 
 import android.Manifest
-import android.content.Intent
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -44,17 +44,28 @@ import com.dpibreak.domain.Presets
  */
 class MainActivity : ComponentActivity() {
 
-    internal val vpnPermissionLauncher = registerForActivityResult(
+    /**
+     * Системный диалог разрешения VPN. Раньше результат игнорировался: после
+     * согласия приходилось нажимать кнопку «Включить» второй раз, а при отказе
+     * статус так и оставался «Обход выключен» без объяснения причины.
+     */
+    private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        // Пользователь дал или отклонил разрешение VPN
-        // (если отклонил — сервис не запустится, onRevoke не вызовется)
+        if (result.resultCode == Activity.RESULT_OK) {
+            ServiceManager.start(this)
+        } else {
+            ServiceManager.updateState(
+                ServiceState.Error("Разрешение на VPN не выдано — без него TUN-интерфейс не поднять")
+            )
+        }
     }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
-        // Разрешение на уведомления получено или отклонено — не критично
+        // Разрешение на уведомления получено или отклонено — не критично:
+        // foreground-сервис работает и без него, просто без уведомления.
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,6 +86,22 @@ class MainActivity : ComponentActivity() {
                 MainScreen(this)
             }
         }
+    }
+
+    /** Запрашивает разрешение VPN и только потом запускает сервис. */
+    internal fun requestVpnAndStart() {
+        val prepareIntent = VpnService.prepare(this)
+        if (prepareIntent == null) {
+            ServiceManager.toggle(this)
+            return
+        }
+        // Разрешения нет — значит рабочий туннеля точно отсутствует (например,
+        // отзывали в настройках). Возвращаем UI в Idle, иначе start() после
+        // диалога увидит «уже запущено» и промолчит.
+        if (ServiceManager.isRunning) {
+            ServiceManager.updateState(ServiceState.Idle)
+        }
+        vpnPermissionLauncher.launch(prepareIntent)
     }
 }
 
@@ -104,7 +131,7 @@ fun MainScreen(activity: MainActivity) {
             Text(
                 text = when (val s = serviceState) {
                     is ServiceState.Idle -> stringResource(R.string.status_idle)
-                    is ServiceState.Starting -> "Запуск..."
+                    is ServiceState.Starting -> stringResource(R.string.status_starting)
                     is ServiceState.Active -> stringResource(R.string.status_active)
                     is ServiceState.Error -> "Ошибка: ${s.message}"
                 },
@@ -116,7 +143,7 @@ fun MainScreen(activity: MainActivity) {
 
             // --- Выбор пресета ---
             Text(
-                text = "Режим обхода:",
+                text = stringResource(R.string.preset_picker_title),
                 style = MaterialTheme.typography.titleMedium
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -139,7 +166,7 @@ fun MainScreen(activity: MainActivity) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = selectedPreset.description +
-                    if (!canEditPreset) "\n\n(выключите обход, чтобы сменить режим)" else "",
+                    if (!canEditPreset) "\n\n" + stringResource(R.string.preset_locked_hint) else "",
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center
             )
@@ -147,14 +174,7 @@ fun MainScreen(activity: MainActivity) {
             Spacer(modifier = Modifier.height(24.dp))
 
             Button(
-                onClick = {
-                    val prepareIntent = VpnService.prepare(context)
-                    if (prepareIntent != null) {
-                        activity.vpnPermissionLauncher.launch(prepareIntent)
-                    } else {
-                        ServiceManager.toggle(context)
-                    }
-                },
+                onClick = { activity.requestVpnAndStart() },
                 enabled = isButtonEnabled
             ) {
                 Text(
