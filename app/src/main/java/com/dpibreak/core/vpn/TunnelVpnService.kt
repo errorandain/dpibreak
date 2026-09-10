@@ -15,6 +15,7 @@ import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
 import com.dpibreak.core.engine.ByedpiJniEngine
 import com.dpibreak.core.tunnel.TunSocksBridge
+import com.dpibreak.domain.Presets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,6 +42,9 @@ class TunnelVpnService : VpnService() {
     private val engine = ByedpiJniEngine()
     private var healthJob: Job? = null
 
+    /** Аргументы движка от выбранного пресета (приходят с ACTION_START). */
+    @Volatile private var engineArgs: List<String>? = null
+
     /** Все фоновые работы сервиса. */
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
 
@@ -55,6 +59,7 @@ class TunnelVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                engineArgs = intent?.getStringArrayListExtra(EXTRA_ENGINE_ARGS)
                 startInForeground()
                 if (stopping.get()) {
                     Log.w(TAG, "Start requested while stopping — ignoring")
@@ -70,8 +75,9 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun startInForeground() {
+        val presetTitle = Presets.getSelected(this).title
         val pendingIntent = contentIntent(this)
-        val notification = NotificationUtils.createNotification(this, pendingIntent)
+        val notification = NotificationUtils.createNotification(this, pendingIntent, presetTitle)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // Android 14+: тип foreground-сервиса обязателен (specialUse — в манифесте)
             ServiceCompat.startForeground(
@@ -118,8 +124,11 @@ class TunnelVpnService : VpnService() {
         Log.i(TAG, "TUN established, fd=${fd.fd}")
 
         // 2. Движок byedpi: локальный SOCKS5 на 127.0.0.1.
-        //    TODO(Задача 5): сюда подставляются аргументы выбранной стратегии.
-        val port = engine.start(listOf("-i", "127.0.0.1"))
+        //    Аргументы — от пресета, выбранного в UI (или сохранённого,
+        //    если сервис перезапущен системой с null-intent).
+        val presetArgs = engineArgs ?: Presets.getSelected(this).byedpiArgs
+        Log.i(TAG, "Engine preset args: $presetArgs")
+        val port = engine.start(listOf("-i", "127.0.0.1") + presetArgs)
         if (port == null) {
             Log.e(TAG, "byedpi engine failed to start")
             ServiceManager.updateState(
@@ -211,6 +220,9 @@ class TunnelVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.dpibreak.START"
         const val ACTION_STOP = "com.dpibreak.STOP"
+
+        /** StringArrayListExtra: аргументы движка от пресета. */
+        const val EXTRA_ENGINE_ARGS = "com.dpibreak.ENGINE_ARGS"
 
         /** PendingIntent: открыть приложение по нажатию на уведомление. */
         fun contentIntent(context: Context): PendingIntent =

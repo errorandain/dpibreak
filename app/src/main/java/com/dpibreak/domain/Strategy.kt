@@ -1,82 +1,101 @@
 package com.dpibreak.domain
 
+import android.content.Context
+
 /**
  * Стратегия обхода = набор аргументов командной строки движка byedpi.
  *
- * Формат аргументов см. в README движка: https://github.com/hufrea/byedpi
+ * Формат аргументов см. в README движка: app/src/main/jni/byedpi/README.md
  * Важно: рабочие параметры ЗАВИСЯТ ОТ ПРОВАЙДЕРА. Пресеты ниже — стартовые
- * значения из опыта сообщества; их нужно подбирать (см. docs/DPI-TECHNIQUES.md).
+ * значения из опыта сообщества (ByeByeDPI, zapret); их подбирают тестом.
  */
 data class Strategy(
     val id: String,
     val title: String,
     val description: String,
-    /** Аргументы движка byedpi, например: ["-s", "0+s", "-d", "3+s"] */
+    /** Аргументы движка byedpi, например: ["-o1", "-a1", "-r-5+se"] */
     val byedpiArgs: List<String>,
-    /** Список доменов (файл в assets/hostlists/), к которым применяется стратегия */
+    /**
+     * Список доменов (файл в assets/hostlists/), к которым применяется
+     * стратегия через -H. TODO(Задача 6): подключить hostlists.
+     */
     val hostlistFile: String? = null,
 )
 
 /**
  * Готовые пресеты.
  *
- * TODO(Задача 6): проверить/оттюнить на реальных сетях; добавить пресет "Авто".
+ * Значения подобраны из проверенных источников:
+ *  - UNIVERSAL — дефолт приложения ByeByeDPI (тот же движок, тысячи пользователей);
+ *  - YOUTUBE — фейк TLS на SNI + фейки QUIC (YouTube живёт на HTTP/3);
+ *  - DISCORD — fake+split (из разборов Flowseal для Discord);
+ *  - TELEGRAM — MTProto не содержит SNI, поэтому простое разбиение;
+ *  - TRANSPARENT — без обмана, для диагностики самого туннеля.
  */
 object Presets {
 
-    /** Щадящий режим: разбиваем ClientHello на границе SNI. Часто достаточно для YouTube. */
+    /** Без обмана DPI — чистый туннель. Диагностика: работает ли сам конвейер. */
+    val TRANSPARENT = Strategy(
+        id = "transparent",
+        title = "Прозрачный",
+        description = "Без обмана DPI — чистый туннель. Если здесь интернет есть, " +
+            "а в других режимах нет — стратегия не подошла провайдеру.",
+        byedpiArgs = emptyList(),
+    )
+
+    /** Дефолт. Проверенный набор ByeByeDPI: OOB-байт + tlsrec + 1 UDP-фейк. */
+    val UNIVERSAL = Strategy(
+        id = "universal",
+        title = "Универсальный",
+        description = "Проверенный набор по умолчанию (как в ByeByeDPI): " +
+            "OOB-разбиение, tlsrec на SNI, один UDP-фейк.",
+        byedpiArgs = listOf("-o1", "-a1", "-r-5+se"),
+    )
+
+    /** YouTube: блокировка по SNI в TLS + QUIC. */
     val YOUTUBE = Strategy(
         id = "youtube",
         title = "YouTube",
-        description = "Разбиение ClientHello на границе SNI + фейковые UDP",
-        byedpiArgs = listOf(
-            "-s", "0+s",      // split в начале SNI
-            "-d", "3+s",      // disorder около SNI
-            "-a", "3",        // 3 фейковых UDP-пакета (QUIC)
-        ),
-        hostlistFile = "hostlists/youtube.txt",
+        description = "Фейковый TLS-пакет на SNI (доходит до DPI, умирает до сервера) " +
+            "+ 3 фейковых UDP-пакета для QUIC-видео.",
+        byedpiArgs = listOf("-f1+s", "-t8", "-a3"),
     )
 
-    /** Discord: хост-лист + fake с малым TTL. */
+    /** Discord: шлюз TLS + голос UDP. */
     val DISCORD = Strategy(
         id = "discord",
         title = "Discord",
-        description = "Fake-пакеты с малым TTL + split",
-        byedpiArgs = listOf(
-            "-f", "7",        // fake на позиции 7
-            "-t", "8",        // TTL фейка = 8 (подобрать под провайдера!)
-            "-s", "1+s",      // split в SNI
-        ),
-        hostlistFile = "hostlists/discord.txt",
+        description = "Фейк + разбиение ClientHello, UDP-фейк для голосовых каналов.",
+        byedpiArgs = listOf("-f1+s", "-s2+s", "-t8", "-a1"),
     )
 
-    /**
-     * Telegram: в большинстве сетей РФ доступен напрямую.
-     * Если резится по DPI (редкие сети) — помогает split.
-     * Если заблокирован по IP — десинк НЕ поможет (см. README).
-     */
+    /** Telegram: MTProto — не TLS, SNI нет; обычно и так доступен. */
     val TELEGRAM = Strategy(
         id = "telegram",
         title = "Telegram",
-        description = "Split для DPI-фильтрации SNI (не помогает при блокировке по IP)",
-        byedpiArgs = listOf("-s", "0+s"),
-        hostlistFile = "hostlists/telegram.txt",
+        description = "Простое разбиение первого пакета (MTProto — не TLS). " +
+            "Если Telegram заблокирован по IP, десинк не поможет.",
+        byedpiArgs = listOf("-s2", "-a1"),
     )
 
-    /** Всё сразу: YouTube + Discord + Telegram. */
-    val GENERAL = Strategy(
-        id = "general",
-        title = "Общий (YT + Discord + TG)",
-        description = "Универсальный набор: split + disorder + fake",
-        byedpiArgs = listOf(
-            "-s", "0+s",
-            "-d", "3+s",
-            "-f", "7",
-            "-t", "8",
-            "-a", "3",
-        ),
-        hostlistFile = "hostlists/general.txt",
-    )
+    val all = listOf(UNIVERSAL, YOUTUBE, DISCORD, TELEGRAM, TRANSPARENT)
 
-    val all = listOf(YOUTUBE, DISCORD, TELEGRAM, GENERAL)
+    /** Пресет по умолчанию. */
+    val default: Strategy get() = UNIVERSAL
+
+    fun byId(id: String?): Strategy = all.firstOrNull { it.id == id } ?: default
+
+    // ---------- Сохранение выбора ----------
+
+    private const val PREFS = "dpibreak_settings"
+    private const val KEY_PRESET = "preset_id"
+
+    fun getSelected(context: Context): Strategy =
+        byId(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_PRESET, null))
+
+    fun setSelected(context: Context, id: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_PRESET, id).apply()
+    }
 }

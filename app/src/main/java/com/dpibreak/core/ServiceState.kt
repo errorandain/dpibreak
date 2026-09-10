@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import com.dpibreak.core.vpn.TunnelVpnService
+import com.dpibreak.domain.Presets
 
 /**
  * Состояние VPN-сервиса.
@@ -47,8 +48,14 @@ object ServiceManager {
 
         _state.value = ServiceState.Starting
 
+        // Выбранный пресет передаётся в сервис аргументами движка
+        val preset = Presets.getSelected(context)
         val intent = Intent(context, TunnelVpnService::class.java).apply {
             action = TunnelVpnService.ACTION_START
+            putStringArrayListExtra(
+                TunnelVpnService.EXTRA_ENGINE_ARGS,
+                ArrayList(preset.byedpiArgs)
+            )
         }
 
         context.startForegroundService(intent)

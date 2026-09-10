@@ -37,10 +37,14 @@ object NotificationUtils {
     /**
      * Создаёт уведомление для foreground-сервиса.
      */
-    fun createNotification(context: Context, pendingIntent: android.app.PendingIntent): Notification {
+    fun createNotification(
+        context: Context,
+        pendingIntent: android.app.PendingIntent,
+        contentText: String? = null
+    ): Notification {
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle(context.getString(R.string.vpn_notification_title))
-            .setContentText(context.getString(R.string.vpn_notification_text))
+            .setContentText(contentText ?: context.getString(R.string.vpn_notification_text))
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
