@@ -6,8 +6,9 @@ import android.content.Context
  * Стратегия обхода = набор аргументов командной строки движка byedpi.
  *
  * Формат аргументов см. в README движка: app/src/main/jni/byedpi/README.md
- * Важно: рабочие параметры ЗАВИСЯТ ОТ ПРОВАЙДЕРА. Пресеты ниже — стартовые
- * значения из опыта сообщества (ByeByeDPI, zapret); их подбирают тестом.
+ * Важно: рабочие параметры ЗАВИСЯТ ОТ ПРОВАЙДЕРА И СЕТИ (Wi-Fi ≠ мобильный
+ * интернет). Значения ниже — из проверенных рецептов сообщества
+ * (ByeDPIAndroid, zapret), каждая проверена на живом движке в песочнице.
  */
 data class Strategy(
     val id: String,
@@ -25,12 +26,8 @@ data class Strategy(
 /**
  * Готовые пресеты.
  *
- * Значения подобраны из проверенных источников:
- *  - UNIVERSAL — дефолт приложения ByeByeDPI (тот же движок, тысячи пользователей);
- *  - YOUTUBE — фейк TLS на SNI + фейки QUIC (YouTube живёт на HTTP/3);
- *  - DISCORD — fake+split (из разборов Flowseal для Discord);
- *  - TELEGRAM — MTProto не содержит SNI, поэтому простое разбиение;
- *  - TRANSPARENT — без обмана, для диагностики самого туннеля.
+ * Для Discord несколько вариантов: на мобильных операторах и Wi-Fi работают
+ * разные стратегии — пробуйте по очереди (Discord 2 → Discord 3 → Discord).
  */
 object Presets {
 
@@ -52,7 +49,7 @@ object Presets {
         byedpiArgs = listOf("-o1", "-a1", "-r-5+se"),
     )
 
-    /** YouTube: блокировка по SNI в TLS + QUIC. */
+    /** YouTube: фейк TLS на SNI + фейки QUIC. */
     val YOUTUBE = Strategy(
         id = "youtube",
         title = "YouTube",
@@ -61,24 +58,47 @@ object Presets {
         byedpiArgs = listOf("-f1+s", "-t8", "-a3"),
     )
 
-    /** Discord: шлюз TLS + голос UDP. */
+    /** Discord, вариант 1: авто-режим, две группы (UDP-фейки + TLS-разбиения). */
     val DISCORD = Strategy(
         id = "discord",
         title = "Discord",
-        description = "Фейк + разбиение ClientHello, UDP-фейк для голосовых каналов.",
-        byedpiArgs = listOf("-f1+s", "-s2+s", "-t8", "-a1"),
+        description = "Авто-режим: UDP-фейки для голоса + разбиение/disorder " +
+            "для TLS. Рабочий рецепт сообщества (Wi-Fi и мобильные).",
+        byedpiArgs = listOf("-Ku", "-a3", "-An", "-Kt,h", "-d1", "-s0+s", "-d3+s"),
     )
 
-    /** Telegram: MTProto — не TLS, SNI нет; обычно и так доступен. */
+    /** Discord, вариант 2: серия разбиений внутри SNI (свежий, мобильные РФ). */
+    val DISCORD_2 = Strategy(
+        id = "discord2",
+        title = "Discord 2",
+        description = "Серия разбиений внутри SNI. Отчёты 2026 г.: МТС, " +
+            "Ростелеком, Теле2. Начните с этого, если вы на мобильном интернете.",
+        byedpiArgs = listOf("-s3:7+sm", "-a1"),
+    )
+
+    /** Discord, вариант 3: fake по Host + OOB (мобильные Yota/МТС). */
+    val DISCORD_3 = Strategy(
+        id = "discord3",
+        title = "Discord 3",
+        description = "Fake-пакет по смещению Host + OOB-байт. Отчёты: " +
+            "мобильные Yota и МТС (и голос работал).",
+        byedpiArgs = listOf("-f9+hm", "-o3", "-a2"),
+    )
+
+    /**
+     * Telegram: MTProto — не TLS (SNI нет), ТСПУ распознаёт сам протокол.
+     * Разбиение первого пакета + UDP-фейки для звонков (STUN).
+     * Если замедление по IP — десинк поможет лишь частично.
+     */
     val TELEGRAM = Strategy(
         id = "telegram",
         title = "Telegram",
-        description = "Простое разбиение первого пакета (MTProto — не TLS). " +
-            "Если Telegram заблокирован по IP, десинк не поможет.",
-        byedpiArgs = listOf("-s2", "-a1"),
+        description = "Разбиение первого пакета MTProto + UDP-фейки для звонков. " +
+            "Текст может заработать; если замедление по IP — увы, нужен прокси.",
+        byedpiArgs = listOf("-d1", "-s3", "-a2"),
     )
 
-    val all = listOf(UNIVERSAL, YOUTUBE, DISCORD, TELEGRAM, TRANSPARENT)
+    val all = listOf(UNIVERSAL, YOUTUBE, DISCORD, DISCORD_2, DISCORD_3, TELEGRAM, TRANSPARENT)
 
     /** Пресет по умолчанию. */
     val default: Strategy get() = UNIVERSAL
