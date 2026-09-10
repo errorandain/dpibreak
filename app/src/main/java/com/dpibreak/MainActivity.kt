@@ -16,12 +16,18 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,12 +35,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.dpibreak.core.DiagLog
 import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
 import com.dpibreak.domain.Presets
@@ -124,6 +134,7 @@ fun MainScreen(activity: MainActivity) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -180,6 +191,46 @@ fun MainScreen(activity: MainActivity) {
                 Text(
                     if (isActive) stringResource(R.string.btn_stop)
                     else stringResource(R.string.btn_start)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // --- Диагностика (Задачи 5/9): лог движка и туннеля ---
+            var showLog by remember { mutableStateOf(false) }
+            var logText by remember { mutableStateOf("") }
+            OutlinedButton(onClick = {
+                logText = DiagLog.collect(context)
+                showLog = true
+            }) {
+                Text("Лог диагностики")
+            }
+            if (showLog) {
+                val clipboard = LocalClipboardManager.current
+                AlertDialog(
+                    onDismissRequest = { showLog = false },
+                    title = { Text("Лог диагностики") },
+                    text = {
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = logText,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showLog = false }) { Text("Закрыть") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            clipboard.setText(AnnotatedString(logText))
+                        }) { Text("Скопировать") }
+                    }
                 )
             }
         }

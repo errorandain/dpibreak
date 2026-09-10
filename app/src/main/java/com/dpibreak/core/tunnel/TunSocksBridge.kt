@@ -72,6 +72,10 @@ object TunSocksBridge {
             Log.e(TAG, "tun2socks is already running — stop it first")
             return false
         }
+        // Лог hev — в файл (диагностика, см. core/DiagLog). Logger пишет в append,
+        // поэтому перед стартом удаляем старый файл.
+        val hevLogFile = File(cacheDir, "hev.log")
+        runCatching { if (hevLogFile.exists()) hevLogFile.delete() }
         val config = buildString {
             appendLine("tunnel:")
             appendLine("  mtu: 8500")
@@ -88,6 +92,8 @@ object TunSocksBridge {
             appendLine("  cache-size: 10000")
             appendLine("misc:")
             appendLine("  task-stack-size: 81920")
+            appendLine("  log-level: debug")
+            appendLine("  log-file: ${hevLogFile.absolutePath}")
             appendLine("socks5:")
             appendLine("  address: $socksHost")
             appendLine("  port: $socksPort")
