@@ -1,13 +1,11 @@
 # YouTube: домены для hostlist-фильтрации.
-# TODO(Задача 6): сверить правила матчинга с README byedpi (опция -H/--hosts).
+# Совпадение в движке — по суффиксу: googlevideo.com покрывает
+# и rr5---sn-xxxx.googlevideo.com. Эталон списка; в пресетах он
+# передаётся движку встроенной строкой (domain/Strategy.kt).
 youtube.com
-www.youtube.com
-m.youtube.com
-music.youtube.com
-youtubei.googleapis.com
+youtu.be
 googlevideo.com
-www.googlevideo.com
 ytimg.com
-i.ytimg.com
 ggpht.com
-yt3.ggpht.com
+gvt1.com
+youtubei.googleapis.com

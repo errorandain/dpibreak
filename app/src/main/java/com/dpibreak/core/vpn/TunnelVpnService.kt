@@ -105,11 +105,16 @@ class TunnelVpnService : VpnService() {
         //    Настройки повторяют проверенный эталон (ByeByeDPI):
         //    адрес /32, маршрут по умолчанию, DNS, своё приложение исключено.
         //    MTU интерфейса не задаём: туннель работает со значением по умолчанию.
+        //
+        //    DNS указывает на служебный адрес mapdns (Задача 6): hev-socks5-
+        //    tunnel перехватывает запросы к нему прямо в туннеле, поэтому
+        //    резолвинг не зависит от UDP-релея движка (пресет «Умный»
+        //    выключает UDP целиком ради блокировки QUIC).
         val fd = Builder()
             .setSession("DPIBreak")
             .addAddress("10.111.0.2", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("1.1.1.1")
+            .addDnsServer(TunSocksBridge.MAPDNS_ADDRESS)
             .addDisallowedApplication(packageName)
             .establish()
             ?: run {
