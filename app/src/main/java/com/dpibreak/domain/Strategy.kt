@@ -81,7 +81,7 @@ object Presets {
         id = "discord3",
         title = "Discord 3",
         description = "Fake-пакет по смещению Host + OOB-байт. Отчёты: " +
-            "мобильные Yota и МТС (и голос работал).",
+            "мобильные Yota и МТС. ✅ Подтверждён на нашем тестовом Samsung.",
         byedpiArgs = listOf("-f9+hm", "-o3", "-a2"),
     )
 
