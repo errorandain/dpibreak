@@ -189,7 +189,10 @@ class TunnelVpnService : VpnService() {
                     .setSession("DPIBreak")
                     .addAddress("10.111.0.2", 32)
                     .addRoute("0.0.0.0", 0)
-                    .addDnsServer("1.1.1.1")
+                    // DNS -> служебный адрес mapdns (Задача 6): он
+                    // перехватывается прямо в туннеле, поэтому резолвинг
+                    // жив даже при -U (пресет «Умный» выключает UDP).
+                    .addDnsServer(TunSocksBridge.MAPDNS_ADDRESS)
                     .addDisallowedApplication(packageName)
                     .establish()
             }.onFailure { Log.e(TAG, "TUN establish threw", it) }.getOrNull()

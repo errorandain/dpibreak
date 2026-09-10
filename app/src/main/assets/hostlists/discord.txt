@@ -1,4 +1,6 @@
 # Discord: домены.
+# Совпадение в движке — по суффиксу. Эталон списка; в пресетах он
+# передаётся движку встроенной строкой (domain/Strategy.kt).
 discord.com
 discord.gg
 discordapp.com

@@ -21,6 +21,9 @@ object TunSocksBridge {
 
     private const val TAG = "DPIBreak"
 
+    /** Служебный DNS-адрес внутри туннеля: его перехватывает mapdns. */
+    const val MAPDNS_ADDRESS = "198.18.0.2"
+
     /**
      * Файл конфига. Имя фиксированное (не tempFile): файл перезаписывается при
      * каждом старте и удаляется при остановке — иначе в cacheDir копился бы мусор.
@@ -72,6 +75,17 @@ object TunSocksBridge {
         val config = buildString {
             appendLine("tunnel:")
             appendLine("  mtu: 8500")
+            // MapDNS (Задача 6): DNS-запросы приложений к MAPDNS_ADDRESS:53
+            // перехватываются внутри туннеля и отвечаются «фейковыми» IP из
+            // сети 100.64.0.0/10. Когда приложение обращается к такому IP,
+            // в SOCKS5 уходит ДОМЕН (обратный lookup) — движок byedpi видит
+            // домен, работают фильтры -H, а DNS жив даже при -U (без UDP).
+            appendLine("mapdns:")
+            appendLine("  address: $MAPDNS_ADDRESS")
+            appendLine("  port: 53")
+            appendLine("  network: 100.64.0.0")
+            appendLine("  netmask: 255.192.0.0")
+            appendLine("  cache-size: 10000")
             appendLine("misc:")
             appendLine("  task-stack-size: 81920")
             appendLine("socks5:")

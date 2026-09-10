@@ -16,12 +16,27 @@ data class Strategy(
     val description: String,
     /** Аргументы движка byedpi, например: ["-o1", "-a1", "-r-5+se"] */
     val byedpiArgs: List<String>,
-    /**
-     * Список доменов (файл в assets/hostlists/), к которым применяется
-     * стратегия через -H. TODO(Задача 6): подключить hostlists.
-     */
-    val hostlistFile: String? = null,
 )
+
+// ---------- Встроенные hostlists (Задача 6) ----------
+//
+// Домены передаются движку прямо в аргументах: byedpi понимает -H со
+// строкой после двоеточия («-H:домен1 домен2 ...», разделитель — пробел).
+// Совпадение — по суффиксу: «googlevideo.com» покрывает и
+// «rr5---sn-xxxx.googlevideo.com» (см. host_cmp в исходниках движка).
+
+/** YouTube: включая домены видео-трафика (googlevideo.com — критично для видео). */
+private val YOUTUBE_DOMAINS = listOf(
+    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "gvt1.com", "youtu.be",
+)
+
+/** Discord: основной сайт, медиа и голосовая инфраструктура. */
+private val DISCORD_DOMAINS = listOf(
+    "discord.com", "discord.gg", "discordapp.com", "discordapp.net", "discord.media",
+)
+
+/** Аргумент -H со встроенным списком доменов (один элемент argv). */
+private fun hostsArg(domains: List<String>) = "-H:" + domains.joinToString(" ")
 
 /**
  * Готовые пресеты.
@@ -30,6 +45,41 @@ data class Strategy(
  * разные стратегии — пробуйте по очереди (Discord 2 → Discord 3 → Discord).
  */
 object Presets {
+
+    /**
+     * Умный: разные рецепты для разных сервисов + блокировка QUIC (Задача 6).
+     *
+     * Группы byedpi (разделяются -A, проверяются слева направо):
+     *  1. «-U -Kh -An»     — UDP выключен целиком (это и есть блокировка QUIC:
+     *     YouTube перестаёт пытаться играть видео через UDP 443 и переходит
+     *     на TCP, где работает десинк). Обычный HTTP — без вмешательства.
+     *  2. «-Kt -H:YT ...»  — домены YouTube: рецепт «Универсального»
+     *     (OOB-байт + tlsrec на SNI; -a1 убран — UDP всё равно выключен).
+     *  3. «-Kt -H:DC ...»  — домены Discord: разбиение внутри SNI (рецепт
+     *     «Discord 2», свежие отчёты с мобильных операторов РФ).
+     *  4. «-Kt,h»          — остальной TLS/HTTP — без вмешательства;
+     *     прочий TCP byedpi пропускает через авто-добавленную пустую группу.
+     *
+     * DNS работает через mapdns (см. TunSocksBridge) — поэтому при -U
+     * резолвинг не ломается.
+     *
+     * Минус режима: без UDP не работают звонки в мессенджерах (Discord-голос,
+     * Telegram/WhatsApp-звонки). Для них — остальные пресеты.
+     */
+    val SMART = Strategy(
+        id = "smart",
+        title = "Умный (YouTube + Discord)",
+        description = "Разные рецепты для разных сервисов: YouTube — как в " +
+            "«Универсальном», Discord — разбиение внутри SNI. QUIC (UDP) " +
+            "выключен: на мобильном интернете видео YouTube идёт по TCP. " +
+            "Минус: звонки в мессенджерах в этом режиме не работают.",
+        byedpiArgs = listOf(
+            "-U", "-Kh", "-An",
+            "-Kt", hostsArg(YOUTUBE_DOMAINS), "-o1", "-r-5+se", "-An",
+            "-Kt", hostsArg(DISCORD_DOMAINS), "-s3:7+sm", "-An",
+            "-Kt,h",
+        ),
+    )
 
     /** Без обмана DPI — чистый туннель. Диагностика: работает ли сам конвейер. */
     val TRANSPARENT = Strategy(
@@ -40,7 +90,7 @@ object Presets {
         byedpiArgs = emptyList(),
     )
 
-    /** Дефолт. Проверенный набор ByeByeDPI: OOB-байт + tlsrec + 1 UDP-фейк. */
+    /** Рецепт сообщества (ByeByeDPI): OOB-байт + tlsrec + 1 UDP-фейк. */
     val UNIVERSAL = Strategy(
         id = "universal",
         title = "Универсальный",
@@ -98,10 +148,10 @@ object Presets {
         byedpiArgs = listOf("-d1", "-s3", "-a2"),
     )
 
-    val all = listOf(UNIVERSAL, YOUTUBE, DISCORD, DISCORD_2, DISCORD_3, TELEGRAM, TRANSPARENT)
+    val all = listOf(SMART, UNIVERSAL, YOUTUBE, DISCORD, DISCORD_2, DISCORD_3, TELEGRAM, TRANSPARENT)
 
     /** Пресет по умолчанию. */
-    val default: Strategy get() = UNIVERSAL
+    val default: Strategy get() = SMART
 
     fun byId(id: String?): Strategy = all.firstOrNull { it.id == id } ?: default
 
