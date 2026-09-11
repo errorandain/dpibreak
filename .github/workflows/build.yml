@@ -9,61 +9,89 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (с сабмодулями)
+      - name: Checkout code with submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: JDK 17
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # Gradle wrapper уже в репозитории (gradlew + gradle/wrapper).
-      # Действие лишь кеширует дистрибутив Gradle между сборками.
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # Согласие с лицензиями Android SDK и установка нужной платформы (API 35)
-      # (на облачных серверах GitHub Android SDK есть, но не со всеми версиями)
-      - name: Setup Android SDK (API 35)
+      - name: Enable KVM for nested virtualization (if available)
         run: |
-          # Определяем путь к sdkmanager
-          if [ -n "$ANDROID_HOME" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          elif [ -n "$ANDROID_HOME" ]; then
-            SDKMGR="$(find "$ANDROID_HOME" -name "sdkmanager" -type f 2>/dev/null | head -n1)"
-          fi
-          
-          # Если sdkmanager не найден — устанавливаем cmdline-tools
-          if [ -z "$SDKMGR" ] || [ ! -x "$SDKMGR" ]; then
-            echo "sdkmanager not found, installing cmdline-tools..."
-            mkdir -p "$ANDROID_HOME/cmdline-tools"
-            cd "$ANDROID_HOME/cmdline-tools"
-            curl -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            unzip -q cmdline-tools.zip
-            mv cmdline-tools latest
-            rm cmdline-tools.zip
-            SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          fi
-          
-          echo "Using sdkmanager: $SDKMGR"
-          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
-          "$SDKMGR" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          echo "Checking KVM availability..."
+          ls -la /dev/kvm || true
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 9.0
+
+      - name: Install required SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" \
+                     "build-tools;35.0.0" \
+                     "cmake;3.22.1" \
+                     "ndk;26.1.10909125" \
+                     "platform-tools"
+
+      - name: Verify NDK installation
+        run: |
+          echo "NDK location: $ANDROID_NDK_HOME"
+          ls -la "$ANDROID_NDK_HOME" || echo "NDK not found, trying alternative path..."
+          test -d "$ANDROID_NDK_HOME" || test -d "$HOME/Android/Sdk/ndk/26.1.10909125" || {
+            echo "ERROR: NDK not installed correctly"
+            exit 1
+          }
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # Очистка кэша CMake для избежания проблем с устаревшими артефактами
-      - name: Clean CMake cache
-        run: rm -rf app/.cxx
+      - name: Clean CMake and build cache
+        run: |
+          rm -rf app/.cxx
+          rm -rf app/build
+          rm -rf .gradle
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build debug APK with verbose output
+        run: |
+          ./gradlew clean assembleDebug \
+            --stacktrace \
+            --info \
+            --no-daemon \
+            -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8"
+
+      - name: Verify APK was built
+        run: |
+          ls -lh app/build/outputs/apk/debug/*.apk || {
+            echo "ERROR: APK not found!"
+            find app/build -name "*.apk" 2>/dev/null
+            exit 1
+          }
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: dpibreak-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            app/build/outputs/logs/
+            .gradle/
+          retention-days: 7

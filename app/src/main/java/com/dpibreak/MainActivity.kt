@@ -11,8 +11,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -20,14 +18,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +47,8 @@ import com.dpibreak.domain.Presets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 
 /**
  * Главный экран: статус, выбор пресета обхода, кнопка вкл/выкл.
@@ -119,7 +116,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MainScreen(activity: MainActivity) {
     val serviceState by ServiceManager.state.collectAsStateWithLifecycle()
@@ -129,10 +125,10 @@ fun MainScreen(activity: MainActivity) {
     val isStarting = serviceState is ServiceState.Starting
     val isButtonEnabled = !isStarting
 
-    // Пресет обхода: выбирается чипами, сохраняется в SharedPreferences
-    var selectedPreset by remember { mutableStateOf(Presets.getSelected(context)) }
-    // Менять пресет можно только при выключенном обходе
-    val canEditPreset = serviceState is ServiceState.Idle || serviceState is ServiceState.Error
+    // Пресет обхода: единственный универсальный
+    val selectedPreset = Presets.UNIVERSAL
+    // Менять пресет нельзя (он один), но оставляем для совместимости UI
+    val canEditPreset = false
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -156,33 +152,10 @@ fun MainScreen(activity: MainActivity) {
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // --- Выбор пресета ---
+            // --- Описание универсального пресета ---
             Text(
-                text = stringResource(R.string.preset_picker_title),
-                style = MaterialTheme.typography.titleMedium
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Presets.all.forEach { preset ->
-                    FilterChip(
-                        selected = selectedPreset.id == preset.id,
-                        onClick = {
-                            selectedPreset = preset
-                            Presets.setSelected(context, preset.id)
-                        },
-                        enabled = canEditPreset,
-                        label = { Text(preset.title) }
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = selectedPreset.description +
-                    if (!canEditPreset) "\n\n" + stringResource(R.string.preset_locked_hint) else "",
-                style = MaterialTheme.typography.bodySmall,
+                text = selectedPreset.description,
+                style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center
             )
 
