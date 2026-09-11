@@ -13,6 +13,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -23,25 +24,74 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Enable KVM for nested virtualization (if available)
+        run: |
+          echo "Checking KVM availability..."
+          ls -la /dev/kvm || true
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 9.0
 
       - name: Install required SDK components
         run: |
-          sdkmanager --licenses || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;26.1.10909125"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" \
+                     "build-tools;35.0.0" \
+                     "cmake;3.22.1" \
+                     "ndk;26.1.10909125" \
+                     "platform-tools"
+
+      - name: Verify NDK installation
+        run: |
+          echo "NDK location: $ANDROID_NDK_HOME"
+          ls -la "$ANDROID_NDK_HOME" || echo "NDK not found, trying alternative path..."
+          test -d "$ANDROID_NDK_HOME" || test -d "$HOME/Android/Sdk/ndk/26.1.10909125" || {
+            echo "ERROR: NDK not installed correctly"
+            exit 1
+          }
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Clean CMake cache
-        run: rm -rf app/.cxx
+      - name: Clean CMake and build cache
+        run: |
+          rm -rf app/.cxx
+          rm -rf app/build
+          rm -rf .gradle
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build debug APK with verbose output
+        run: |
+          ./gradlew clean assembleDebug \
+            --stacktrace \
+            --info \
+            --no-daemon \
+            -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8"
+
+      - name: Verify APK was built
+        run: |
+          ls -lh app/build/outputs/apk/debug/*.apk || {
+            echo "ERROR: APK not found!"
+            find app/build -name "*.apk" 2>/dev/null
+            exit 1
+          }
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: dpibreak-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            app/build/outputs/logs/
+            .gradle/
+          retention-days: 7
