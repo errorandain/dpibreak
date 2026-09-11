@@ -1,0 +1,4 @@
+C:/dpibreak/app/.cxx/Debug/6m305623/armeabi-v7a/CMakeFiles/byedpi.dir
+C:/dpibreak/app/.cxx/Debug/6m305623/armeabi-v7a/CMakeFiles/dpibreak.dir
+C:/dpibreak/app/.cxx/Debug/6m305623/armeabi-v7a/CMakeFiles/edit_cache.dir
+C:/dpibreak/app/.cxx/Debug/6m305623/armeabi-v7a/CMakeFiles/rebuild_cache.dir

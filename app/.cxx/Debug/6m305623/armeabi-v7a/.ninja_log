@@ -1,0 +1,13 @@
+# ninja log v5
+1	76	8106738506730712	CMakeFiles/dpibreak.dir/native-lib.c.o	ceba9014ec6d5841
+76	177	8106738507630739	C:/dpibreak/app/build/intermediates/cxx/Debug/6m305623/obj/armeabi-v7a/libdpibreak.so	eb430b0e1064afe8
+53	151	8106901913289218	CMakeFiles/dpibreak.dir/native-lib.c.o	83d3a26f8d7e2c76
+45	213	8106901913889331	CMakeFiles/byedpi.dir/byedpi/conev.c.o	e205fcba6819f69a
+1	224	8106901914004505	CMakeFiles/byedpi.dir/byedpi/mpool.c.o	938d02c9a583f34f
+11	239	8106901914164481	CMakeFiles/byedpi.dir/byedpi/desync.c.o	d5c0ddbaf89ae790
+26	261	8106901914404495	CMakeFiles/byedpi.dir/byedpi/packets.c.o	91df4262335f7a10
+20	283	8106901914614539	CMakeFiles/byedpi.dir/byedpi/proxy.c.o	4856019752424f9
+61	285	8106901914624544	CMakeFiles/byedpi.dir/byedpi/extend.c.o	ad8865be30d86f5a
+38	303	8106901914794512	CMakeFiles/byedpi.dir/byedpi/main.c.o	178fcf331dbdaf7e
+304	406	8106901915665002	libbyedpi.a	e2662b4e0957f9d2
+407	516	8106901916900232	C:/dpibreak/app/build/intermediates/cxx/Debug/6m305623/obj/armeabi-v7a/libdpibreak.so	99b724e0ee6f19b1

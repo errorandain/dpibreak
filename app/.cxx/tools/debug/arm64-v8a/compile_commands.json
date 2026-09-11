@@ -1,0 +1,42 @@
+[
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -D_DEFAULT_SOURCE -DANDROID_APP -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -Wno-gnu-zero-variadic-macro-arguments -Wno-unused-function -pedantic -o CMakeFiles\\byedpi.dir\\byedpi\\packets.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\packets.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\packets.c"
+},
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -D_DEFAULT_SOURCE -DANDROID_APP -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -Wno-gnu-zero-variadic-macro-arguments -Wno-unused-function -pedantic -o CMakeFiles\\byedpi.dir\\byedpi\\main.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\main.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\main.c"
+},
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -D_DEFAULT_SOURCE -DANDROID_APP -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -Wno-gnu-zero-variadic-macro-arguments -Wno-unused-function -pedantic -o CMakeFiles\\byedpi.dir\\byedpi\\conev.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\conev.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\conev.c"
+},
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -D_DEFAULT_SOURCE -DANDROID_APP -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -Wno-gnu-zero-variadic-macro-arguments -Wno-unused-function -pedantic -o CMakeFiles\\byedpi.dir\\byedpi\\proxy.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\proxy.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\proxy.c"
+},
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -D_DEFAULT_SOURCE -DANDROID_APP -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -Wno-gnu-zero-variadic-macro-arguments -Wno-unused-function -pedantic -o CMakeFiles\\byedpi.dir\\byedpi\\desync.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\desync.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\desync.c"
+},
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -D_DEFAULT_SOURCE -DANDROID_APP -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -Wno-gnu-zero-variadic-macro-arguments -Wno-unused-function -pedantic -o CMakeFiles\\byedpi.dir\\byedpi\\mpool.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\mpool.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\mpool.c"
+},
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -D_DEFAULT_SOURCE -DANDROID_APP -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -Wno-gnu-zero-variadic-macro-arguments -Wno-unused-function -pedantic -o CMakeFiles\\byedpi.dir\\byedpi\\extend.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\extend.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\byedpi\\extend.c"
+},
+{
+  "directory": "C:/dpibreak/app/.cxx/Debug/6m305623/arm64-v8a",
+  "command": "C:\\Users\\user\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android24 --sysroot=C:/Users/user/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Ddpibreak_EXPORTS -IC:/dpibreak/app/src/main/cpp/byedpi -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -o CMakeFiles\\dpibreak.dir\\native-lib.c.o -c C:\\dpibreak\\app\\src\\main\\cpp\\native-lib.c",
+  "file": "C:\\dpibreak\\app\\src\\main\\cpp\\native-lib.c"
+}
+]
