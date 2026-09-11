@@ -1,13 +1,29 @@
+```
 # Compiled and build artifacts
 *.class
 *.o
 *.obj
-*.out
-*.dll
 *.so
 *.a
+*.dll
+*.exe
+*.out
 *.pyc
 __pycache__/
+*.pyo
+*.pyd
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.tar
+*.gz
+*.rar
+*.7z
+*.bz2
+*.xz
+*.zst
 
 # Dependencies
 node_modules/
@@ -16,55 +32,58 @@ venv/
 .env
 .env.local
 .env.*
-
-# Build directories
-dist/
-build/
 target/
 .gradle/
-.mypy_cache/
-.pytest_cache/
-coverage/
-htmlcov/
-*.log
+.build/
+dist/
+build/
+*.egg-info/
+.Python/
+.python-version
+poetry.lock
+Gemfile.lock
+package-lock.json
+yarn.lock
+npm-debug.log*
+yarn-error.log*
+.pnp.*
+.pnp.js
 
-# Editors
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *.tmp
-
-# System
+*.log
+*~
 .DS_Store
 Thumbs.db
+desktop.ini
+ehthumbs.db
+Icon?
+._*
 
-# Compressed files
-*.zip
-*.gz
-*.tar
-*.tgz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.tar.zst
-
-# Coverage
+# Test and coverage
 .coverage
+coverage/
+htmlcov/
+.nyc_output/
+istanbul/
+.mypy_cache/
+.pytest_cache/
+.hypothesis/
 
-# Original rules preserved
-*.log
+# System and OS
+*.tmp
+*.temp
+*.bak
+*.backup
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+```

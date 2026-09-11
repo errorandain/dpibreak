@@ -5,7 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.VpnService
-import android.os.Build
+import android.os.Build.VERSION.SDK_INT
+import android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.ServiceCompat
@@ -134,7 +135,7 @@ class TunnelVpnService : VpnService() {
     private fun startInForeground(): Boolean = try {
         val presetTitle = Presets.getSelected(this).title
         val notification = NotificationUtils.createNotification(this, contentIntent(this), presetTitle)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        if (SDK_INT >= UPSIDE_DOWN_CAKE) {
             // Android 14+: тип foreground-сервиса обязателен (specialUse — в манифесте)
             ServiceCompat.startForeground(
                 this, NotificationUtils.NOTIFICATION_ID, notification,
@@ -196,6 +197,7 @@ class TunnelVpnService : VpnService() {
             //    establish() может бросить SecurityException, если разрешение VPN
             //    отозвали в момент вызова (OEM-оболочки), — поэтому в runCatching.
             
+            val preset = Presets.getSelected(this)
             val builder = Builder()
                 .setSession("DPIBreak")
                 .addAddress("10.111.0.2", 32)
@@ -223,6 +225,30 @@ class TunnelVpnService : VpnService() {
                     // Приложение может отсутствовать на устройстве (например, Huawei без GMS)
                     Log.d(TAG, "App $pkg not found, skipping exclusion")
                 }
+            }
+            
+            // Исключения из стратегии (per-app bypass, Задача 7)
+            // Приложения из excludedApps идут напрямую, минуя VPN-туннель.
+            // Это нужно для банков, Госуслуг и других чувствительных к VPN приложений.
+            for (pkg in preset.excludedApps) {
+                try {
+                    builder.addDisallowedApplication(pkg)
+                    Log.d(TAG, "Excluded app from VPN: $pkg")
+                } catch (e: Exception) {
+                    // Приложение может отсутствовать на устройстве
+                    Log.d(TAG, "Excluded app $pkg not found, skipping")
+                }
+            }
+            
+            // Блокировка QUIC (UDP 443) для стабильного видео (Задача 6)
+            // YouTube и другие сервисы используют QUIC, который ломается без прокси.
+            // Блокируем только UDP-трафик на уровне VPN, чтобы приложения
+            // переключались на TCP/TLS, который обрабатывается движком byedpi.
+            if (preset.blockQuic) {
+                // addBlockedPort блокирует указанные порты для UDP-трафика.
+                // Это вынуждает приложения (YouTube, Discord) использовать TCP вместо QUIC.
+                builder.addBlockedPort(443)
+                Log.i(TAG, "QUIC blocking enabled: UDP port 443 blocked to force TCP fallback")
             }
 
             val fd = runCatching {
