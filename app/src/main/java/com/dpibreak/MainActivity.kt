@@ -47,7 +47,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.dpibreak.core.DiagLog
 import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
+import com.dpibreak.core.net.ConnectionSelfTest
 import com.dpibreak.domain.Presets
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Главный экран: статус, выбор пресета обхода, кнопка вкл/выкл.
@@ -195,6 +199,47 @@ fun MainScreen(activity: MainActivity) {
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // --- Самопроверка связи: текст (TCP) и голос (UDP) ---
+            if (isActive) {
+                var testing by remember { mutableStateOf(false) }
+                var testResult by remember { mutableStateOf<ConnectionSelfTest.Result?>(null) }
+                OutlinedButton(
+                    onClick = {
+                        testing = true
+                        testResult = null
+                        CoroutineScope(Dispatchers.Main).launch {
+                            testResult = ConnectionSelfTest.run()
+                            testing = false
+                        }
+                    },
+                    enabled = !testing
+                ) {
+                    Text(if (testing) "Проверяю…" else "Проверить связь")
+                }
+                testResult?.let { res ->
+                    AlertDialog(
+                        onDismissRequest = { testResult = null },
+                        title = { Text("Проверка связи") },
+                        text = {
+                            Column {
+                                Text(
+                                    "Текст (TCP): ${if (res.tcpOk) "✅" else "❌"}\n" +
+                                        "${res.tcpDetail}\n\n" +
+                                        "Голос (UDP): ${if (res.udpOk) "✅" else "❌"}\n" +
+                                        "${res.udpDetail}\n\n" +
+                                        res.verdict
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { testResult = null }) { Text("Закрыть") }
+                        }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // --- Диагностика (Задачи 5/9): лог движка и туннеля ---
             var showLog by remember { mutableStateOf(false) }
