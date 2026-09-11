@@ -57,6 +57,7 @@ object Presets {
      *     (OOB-байт + tlsrec на SNI; -a1 убран — UDP всё равно выключен).
      *  3. «-Kt -H:DC ...»  — домены Discord: разбиение внутри SNI (рецепт
      *     «Discord 2», свежие отчёты с мобильных операторов РФ).
+     *     UDP включён только для Discord (голосовые звонки).
      *  4. «-Kt,h»          — остальной TLS/HTTP — без вмешательства;
      *     прочий TCP byedpi пропускает через авто-добавленную пустую группу.
      *
@@ -64,19 +65,22 @@ object Presets {
      * резолвинг не ломается.
      *
      * Минус режима: без UDP не работают звонки в мессенджерах (Discord-голос,
-     * Telegram/WhatsApp-звонки). Для них — остальные пресеты.
+     * Telegram/WhatsApp-звонки), кроме доменов Discord. Для них — остальные пресеты.
      */
     val SMART = Strategy(
         id = "smart",
         title = "Умный (YouTube + Discord)",
         description = "Разные рецепты для разных сервисов: YouTube — как в " +
-            "«Универсальном», Discord — разбиение внутри SNI. QUIC (UDP) " +
-            "выключен: на мобильном интернете видео YouTube идёт по TCP. " +
-            "Минус: звонки в мессенджерах в этом режиме не работают.",
+            "«Универсальном», Discord — разбиение внутри SNI + UDP для звонков. " +
+            "QUIC (UDP) выключен для всех, кроме Discord: на мобильном интернете " +
+            "видео YouTube идёт по TCP. Минус: звонки в других мессенджерах не работают.",
         byedpiArgs = listOf(
-            "-U", "-Kh", "-An",
-            "-Kt", hostsArg(YOUTUBE_DOMAINS), "-o1", "-r-5+se", "-An",
-            "-Kt", hostsArg(DISCORD_DOMAINS), "-s3:7+sm", "-An",
+            "-Kh", "-An",
+            // Группа 1: YouTube — UDP выключен, работаем только по TCP
+            "-U", "-Kt", hostsArg(YOUTUBE_DOMAINS), "-o1", "-r-5+se", "-An",
+            // Группа 2: Discord — UDP включён для голосовых звонков
+            "-Ku", "-H:" + DISCORD_DOMAINS.joinToString(" "), "-s3:7+sm", "-a1", "-An",
+            // Группа 3: остальной трафик
             "-Kt,h",
         ),
     )
