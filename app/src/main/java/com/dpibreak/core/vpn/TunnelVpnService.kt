@@ -30,7 +30,7 @@ private const val TAG = "DPIBreak"
  *   приложения → TUN-интерфейс → tun2socks (hev-socks5-tunnel, vendored)
  *   → SOCKS5 (byedpi, vendored) → интернет с десинхронизацией DPI.
  *
- * Порядок запуска: startForeground → TUN → движок byedpi → tun2socks.
+ * Порядок запуска: startForeground → ЗАДЕРЖКА → TUN → движок byedpi → tun2socks.
  * Порядок остановки — строго обратный.
  *
  * ### Почему всё делает один сериализованный поток ([worker])
@@ -104,7 +104,7 @@ class TunnelVpnService : VpnService() {
 
         when (intent?.action) {
             ACTION_START -> {
-                engineArgs = intent?.getStringArrayListExtra(EXTRA_ENGINE_ARGS)
+                engineArgs = intent.getStringArrayListExtra(EXTRA_ENGINE_ARGS)
                 worker.execute { startTunnel() }
             }
 
@@ -176,6 +176,17 @@ class TunnelVpnService : VpnService() {
         try {
             Log.i(TAG, "Starting tunnel pipeline…")
 
+            // ВАЖНО: Небольшая пауза после startForeground перед созданием TUN.
+            // На Android 12-14 система должна успеть зарегистрировать сервис как Foreground.
+            // Если создать VPN слишком быстро, будет ошибка ESTABLISH_VPN_SERVICE.
+            Thread.sleep(300)
+
+            if (stopping.get()) {
+                Log.w(TAG, "Stop requested during delay — aborting start")
+                ServiceManager.updateState(ServiceState.Idle)
+                return
+            }
+
             // 1. TUN-интерфейс через VpnService.Builder (без root).
             //    Настройки повторяют проверенный эталон (ByeByeDPI): адрес /32,
             //    маршрут по умолчанию, DNS; своё приложение исключено — так решается
@@ -184,21 +195,46 @@ class TunnelVpnService : VpnService() {
             //    размер буфера чтения, на интерфейс не влияет.
             //    establish() может бросить SecurityException, если разрешение VPN
             //    отозвали в момент вызова (OEM-оболочки), — поэтому в runCatching.
+            
+            val builder = Builder()
+                .setSession("DPIBreak")
+                .addAddress("10.111.0.2", 32)
+                .addRoute("0.0.0.0", 0)
+                // DNS -> служебный адрес mapdns (Задача 6): он
+                // перехватывается прямо в туннеле, поэтому резолвинг
+                // жив даже при -U (пресет «Умный» выключает UDP).
+                .addDnsServer(TunSocksBridge.MAPDNS_ADDRESS)
+                .addDisallowedApplication(packageName)
+            
+            // Исключаем ключевые системные сервисы Google, чтобы избежать петель
+            // и конфликтов при маршрутизации через VPN, особенно на мобильных сетях.
+            val systemAppsToExclude = listOf(
+                "com.android.vending",       // Google Play Store
+                "com.google.android.gms",    // Google Play Services
+                "com.google.android.gsf",    // Google Services Framework
+                "android",                   // System
+                "com.android.systemui"       // System UI
+            )
+
+            for (pkg in systemAppsToExclude) {
+                try {
+                    builder.addDisallowedApplication(pkg)
+                } catch (e: Exception) {
+                    // Приложение может отсутствовать на устройстве (например, Huawei без GMS)
+                    Log.d(TAG, "App $pkg not found, skipping exclusion")
+                }
+            }
+
             val fd = runCatching {
-                Builder()
-                    .setSession("DPIBreak")
-                    .addAddress("10.111.0.2", 32)
-                    .addRoute("0.0.0.0", 0)
-                    // DNS -> служебный адрес mapdns (Задача 6): он
-                    // перехватывается прямо в туннеле, поэтому резолвинг
-                    // жив даже при -U (пресет «Умный» выключает UDP).
-                    .addDnsServer(TunSocksBridge.MAPDNS_ADDRESS)
-                    .addDisallowedApplication(packageName)
-                    .establish()
-            }.onFailure { Log.e(TAG, "TUN establish threw", it) }.getOrNull()
+                builder.establish()
+            }.onFailure { 
+                Log.e(TAG, "TUN establish threw: ${it.message}", it) 
+            }.getOrNull()
 
             if (fd == null) {
-                abort("Не удалось создать TUN-интерфейс (разрешение VPN отозвано?)")
+                val errorMsg = "Не удалось создать TUN-интерфейс. Проверьте разрешение VPN в настройках системы."
+                Log.e(TAG, errorMsg)
+                abort(errorMsg)
                 return
             }
             tunInterface = fd
