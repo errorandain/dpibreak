@@ -1,0 +1,39 @@
+name: Engine tests
+
+# Смоук-тесты движка byedpi: каждый пресет должен запускаться и пропускать
+# TCP + UDP через SOCKS5. Проверяет «не сломан ли движок пресетом», а не
+# эффективность обхода (её видно только на реальном устройстве).
+# Скрипт: scripts/engine_tests/engine_smoke.py
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/src/main/jni/byedpi/**"
+      - "app/src/main/java/com/dpibreak/domain/Strategy.kt"
+      - "scripts/engine_tests/**"
+      - ".github/workflows/engine-tests.yml"
+  pull_request:
+    paths:
+      - "app/src/main/jni/byedpi/**"
+      - "app/src/main/java/com/dpibreak/domain/Strategy.kt"
+      - "scripts/engine_tests/**"
+      - ".github/workflows/engine-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Сборка движка (Linux, те же флаги что в Android.mk)
+        run: |
+          cd app/src/main/jni/byedpi
+          gcc -o /tmp/byedpi-cli main.c proxy.c conev.c desync.c packets.c \
+            extend.c mpool.c -I. -D_DEFAULT_SOURCE -std=c99 -O2 -w -pthread
+
+      - name: Смоук-тесты пресетов (TCP + UDP через SOCKS5)
+        run: python3 scripts/engine_tests/engine_smoke.py /tmp/byedpi-cli
