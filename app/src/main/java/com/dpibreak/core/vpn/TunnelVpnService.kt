@@ -16,7 +16,7 @@ import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
 import com.dpibreak.core.engine.ByedpiJniEngine
 import com.dpibreak.core.tunnel.TunSocksBridge
-import com.dpibreak.domain.Preset
+import com.dpibreak.domain.Presets
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -133,7 +133,7 @@ class TunnelVpnService : VpnService() {
      *  при запуске из фона) — тогда сервис останавливается с внятной ошибкой.
      */
     private fun startInForeground(): Boolean = try {
-        val presetTitle = Presets.getSelected(this).title
+        val presetTitle = Presets.UNIVERSAL.title
         val notification = NotificationUtils.createNotification(this, contentIntent(this), presetTitle)
         if (SDK_INT >= UPSIDE_DOWN_CAKE) {
             // Android 14+: тип foreground-сервиса обязателен (specialUse — в манифесте)

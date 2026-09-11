@@ -1,45 +1,50 @@
-# Compiled and build artifacts
+```kotlin
+# Kotlin/Android specific
 *.class
-*.o
-*.obj
-*.out
-build/
-dist/
+*.dex
+*.jar
+*.aar
+*.so
+*.dylib
+*.dll
 
-# Dependencies
-node_modules/
-venv/
-.venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-target/
+# Android build artifacts
+/build/
+/app/build/
+/.gradle/
 .gradle/
 
-# Logs and temp files
+# IDE specific
+.idea/
+*.iml
+*.iws
+.vscode/
+
+# Compiled Python (if any)
+*.pyc
+__pycache__/
+
+# Logs
 *.log
-*.tmp
-*.swp
 
 # Environment
 .env
 .env.local
 *.env.*
 
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# System files
-.DS_Store
-Thumbs.db
-
 # Coverage
+.coverage
 coverage/
 htmlcov/
-.coverage
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
 
 # Compressed files
 *.zip
@@ -51,16 +56,4 @@ htmlcov/
 *.7z
 *.rar
 *.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.tar.zst
+```
