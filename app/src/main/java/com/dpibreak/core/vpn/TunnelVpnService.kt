@@ -16,7 +16,7 @@ import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
 import com.dpibreak.core.engine.ByedpiJniEngine
 import com.dpibreak.core.tunnel.TunSocksBridge
-import com.dpibreak.domain.Presets
+import com.dpibreak.domain.Preset
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -197,7 +197,7 @@ class TunnelVpnService : VpnService() {
             //    establish() может бросить SecurityException, если разрешение VPN
             //    отозвали в момент вызова (OEM-оболочки), — поэтому в runCatching.
             
-            val preset = Presets.getSelected(this)
+            val preset = Presets.UNIVERSAL
             val builder = Builder()
                 .setSession("DPIBreak")
                 .addAddress("10.111.0.2", 32)
@@ -208,8 +208,7 @@ class TunnelVpnService : VpnService() {
                 .addDnsServer(TunSocksBridge.MAPDNS_ADDRESS)
                 .addDisallowedApplication(packageName)
             
-            // Исключаем ключевые системные сервисы Google, чтобы избежать петель
-            // и конфликтов при маршрутизации через VPN, особенно на мобильных сетях.
+            // Исключаем системные сервисы для предотвращения петель маршрутизации.
             val systemAppsToExclude = listOf(
                 "com.android.vending",       // Google Play Store
                 "com.google.android.gms",    // Google Play Services
@@ -221,46 +220,37 @@ class TunnelVpnService : VpnService() {
             for (pkg in systemAppsToExclude) {
                 try {
                     builder.addDisallowedApplication(pkg)
-                } catch (e: Exception) {
-                    // Приложение может отсутствовать на устройстве (например, Huawei без GMS)
-                    Log.d(TAG, "App $pkg not found, skipping exclusion")
+                } catch (_: Exception) {
+                    // Приложение отсутствует (например, Huawei без GMS)
                 }
             }
             
             // Исключения из стратегии (per-app bypass, Задача 7)
             // Приложения из excludedApps идут напрямую, минуя VPN-туннель.
-            // Это нужно для банков, Госуслуг и других чувствительных к VPN приложений.
             for (pkg in preset.excludedApps) {
                 try {
                     builder.addDisallowedApplication(pkg)
-                    Log.d(TAG, "Excluded app from VPN: $pkg")
-                } catch (e: Exception) {
-                    // Приложение может отсутствовать на устройстве
-                    Log.d(TAG, "Excluded app $pkg not found, skipping")
+                    Log.d(TAG, "Excluded from VPN: $pkg")
+                } catch (_: Exception) {
+                    // Приложение отсутствует на устройстве — не критично
                 }
             }
             
             // Блокировка QUIC (UDP 443) для стабильного видео (Задача 6)
             // YouTube и другие сервисы используют QUIC, который ломается без прокси.
-            // Блокируем только UDP-трафик на уровне VPN, чтобы приложения
-            // переключались на TCP/TLS, который обрабатывается движком byedpi.
+            // addBlockedPort блокирует ТОЛЬКО UDP для указанного порта,
+            // заставляя приложения переключаться на TCP/TLS.
             if (preset.blockQuic) {
-                // addBlockedPort блокирует указанные порты для UDP-трафика.
-                // Это вынуждает приложения (YouTube, Discord) использовать TCP вместо QUIC.
                 builder.addBlockedPort(443)
-                Log.i(TAG, "QUIC blocking enabled: UDP port 443 blocked to force TCP fallback")
+                Log.i(TAG, "QUIC blocking enabled: UDP/443 blocked → force TCP fallback")
             }
 
-            val fd = runCatching {
-                builder.establish()
-            }.onFailure { 
-                Log.e(TAG, "TUN establish threw: ${it.message}", it) 
-            }.getOrNull()
+            val fd = runCatching { builder.establish() }
+                .onFailure { Log.e(TAG, "TUN establish failed: ${it.message}", it) }
+                .getOrNull()
 
             if (fd == null) {
-                val errorMsg = "Не удалось создать TUN-интерфейс. Проверьте разрешение VPN в настройках системы."
-                Log.e(TAG, errorMsg)
-                abort(errorMsg)
+                abort("Не удалось создать TUN-интерфейс. Проверьте разрешение VPN в настройках.")
                 return
             }
             tunInterface = fd
@@ -268,19 +258,14 @@ class TunnelVpnService : VpnService() {
             if (stopRequestedDuringStart()) return
 
             // 2. Движок byedpi: локальный SOCKS5 на 127.0.0.1.
-            //    Аргументы — от пресета, выбранного в UI (или сохранённого,
-            //    если сервис перезапущен системой с null-intent).
-            val presetArgs = engineArgs ?: Presets.getSelected(this).byedpiArgs
-            Log.i(TAG, "Engine preset args: $presetArgs")
+            val presetArgs = engineArgs ?: Presets.UNIVERSAL.byedpiArgs
+            Log.i(TAG, "Engine args: $presetArgs")
             val port = engine.start(listOf("-i", "127.0.0.1") + presetArgs)
             if (port == null) {
-                abort(
-                    "Движок byedpi не запустился (порт 1080 не открылся). " +
-                        "В logcat ищите тег proxy — там причина."
-                )
+                abort("Движок byedpi не запустился. Проверьте лог с тегом proxy.")
                 return
             }
-            Log.i(TAG, "byedpi SOCKS5 listening on 127.0.0.1:$port")
+            Log.i(TAG, "byedpi SOCKS5 on 127.0.0.1:$port")
             if (stopRequestedDuringStart()) return
 
             // 3. tun2socks: TUN → SOCKS5.
@@ -289,8 +274,8 @@ class TunnelVpnService : VpnService() {
                 return
             }
 
-            // 4. Готово. Дальше за состоянием следит watchdog.
-            Log.i(TAG, "Pipeline is UP: TUN → byedpi:$port → tun2socks")
+            // 4. Конвейер готов.
+            Log.i(TAG, "Pipeline UP: TUN → byedpi:$port → tun2socks")
             ServiceManager.updateState(ServiceState.Active)
             armWatchdog()
         } finally {
@@ -332,15 +317,10 @@ class TunnelVpnService : VpnService() {
         stopping.set(false)
     }
 
-    /**
-     * Разбор конвейера в обратном порядке: tun2socks → движок → TUN.
-     * Идемпотентен: повторный вызов из другого потока просто выходит.
-     *
-     * @param restoreIdle false, если состояние уже [ServiceState.Error] — не затираем текст.
-     */
+    /** Разбор конвейера: tun2socks → движок → TUN. Идемпотентен. */
     private fun cleanup(restoreIdle: Boolean) {
         if (!cleaning.compareAndSet(false, true)) {
-            Log.i(TAG, "Cleanup already in progress — ignoring repeat")
+            Log.i(TAG, "Cleanup already in progress")
             return
         }
         try {
@@ -356,39 +336,23 @@ class TunnelVpnService : VpnService() {
         } finally {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
-            if (restoreIdle) {
-                ServiceManager.updateState(ServiceState.Idle)
-            }
+            if (restoreIdle) ServiceManager.updateState(ServiceState.Idle)
             cleaning.set(false)
             Log.i(TAG, "Tunnel stopped")
         }
     }
 
-    /**
-     * Смотритель за живостью конвейера.
-     *
-     * Первая проверка — через 1 с: исторически поток туннеля умирал сразу после
-     * старта, и UI показывал «работает» без интернета. Дальше — раз в
-     * [HEALTH_INTERVAL_SEC]: на агрессивных оболочках (Samsung Low Power Mode,
-     * «оптимизация работы в фоновом режиме») половину туннеля могут убить
-     * через полчаса, и пользователь должен увидеть причину, а не молчаливый ноль.
-     */
+    /** Первая проверка watchdog — через 1 с, далее каждые 30 с. */
     private fun armWatchdog() {
         watchdogTask?.cancel(false)
         watchdogTask = watchdog.scheduleWithFixedDelay({
-            // Идёт сборка конвейера — не вмешиваемся.
             if (startingTunnel || stopping.get() || tunInterface == null) return@scheduleWithFixedDelay
             try {
                 when {
                     !TunSocksBridge.isRunning() ->
-                        abortFromWatchdog(
-                            "Туннель tun2socks остановлен (поток умер). Соберите logcat с тегом DPIBreak"
-                        )
-
+                        abortFromWatchdog("Туннель tun2socks остановлен (поток умер)")
                     !engine.isRunning.value ->
-                        abortFromWatchdog(
-                            "Движок byedpi остановлен системой. Проверьте оптимизацию батареи для DPIBreak"
-                        )
+                        abortFromWatchdog("Движок byedpi остановлен системой")
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "watchdog check failed", t)
@@ -396,11 +360,7 @@ class TunnelVpnService : VpnService() {
         }, FIRST_CHECK_DELAY_MS, HEALTH_INTERVAL_SEC, TimeUnit.SECONDS)
     }
 
-    /**
-     * Реакция watchdog'а. Разборку выполняем на [worker] и ПОВТОРНО проверяем
-     * состояние уже там: пока задача ждала своей очереди, конвейер мог штатно
-     * остановиться или, наоборот, подняться — иначе watchdog убил бы здоровый туннель.
-     */
+    /** Реакция watchdog: разборка на worker с повторной проверкой состояния. */
     private fun abortFromWatchdog(message: String) {
         worker.execute {
             if (!startingTunnel && !stopping.get() && tunInterface != null) {
@@ -409,23 +369,18 @@ class TunnelVpnService : VpnService() {
         }
     }
 
-    /** Разрешение VPN отозвано пользователем из системных настроек. */
+    /** Разрешение VPN отозвано пользователем. */
     override fun onRevoke() {
         Log.w(TAG, "onRevoke: VPN permission revoked")
         worker.execute { stopTunnel() }
-        // Реализация по умолчанию делает stopSelf(); вызываем явно, чтобы система
-        // считала сервис корректно остановленным, а не «убитым».
         super.onRevoke()
     }
 
     override fun onDestroy() {
-        // Если сервис убит системой без штатной остановки — прибираемся, но НЕ
-        // здесь (разборка блокирующая → ANR в главном потоке). Задачу кладём в
-        // тот же worker и закрываем его: поставленное выполнится, новое — нет.
         watchdogTask?.cancel(false)
         watchdog.shutdownNow()
         if (tunInterface != null) {
-            Log.w(TAG, "onDestroy with active tunnel — emergency cleanup in worker")
+            Log.w(TAG, "onDestroy with active tunnel — emergency cleanup")
             worker.execute { cleanup(restoreIdle = true) }
         }
         worker.shutdown()
