@@ -10,12 +10,10 @@ data class UniversalStrategy(
     
     // Основные аргументы ядра byedpi
     // --auto=torst: Автоматически выбирает метод (TLS Record Splitting или Fake Request) в зависимости от типа блокировки
-    // --fake -1: Отправляет фейковый TLS пакет перед реальным (сбрасывает анализ DPI)
     // --tlsrec 1+s: Разбивает первый пакет TLS на части (1 байт + остальное), ломая сигнатуру SNI
     // --disorder 1: Меняет порядок пакетов (если поддерживается ядром)
     val arguments: List<String> = listOf(
         "--auto=torst",
-        "--fake=-1",
         "--tlsrec=1+s",
         "--disorder=1",
         "--dnsover=https://dns.cloudflare.com/dns-query" // Встроенный DoH для надежности
