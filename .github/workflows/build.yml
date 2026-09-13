@@ -32,7 +32,7 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          cmdline-tools-version: 9.0
+          cmdline-tools-version: latest
 
       - name: Install required SDK components
         run: |
@@ -62,6 +62,8 @@ jobs:
           rm -rf .gradle
 
       - name: Build debug APK with verbose output
+        env:
+          GRADLE_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=512m -Dorg.gradle.daemon=false -Dorg.gradle.workers.max=1"
         run: |
           ./gradlew clean assembleDebug \
             --stacktrace \
