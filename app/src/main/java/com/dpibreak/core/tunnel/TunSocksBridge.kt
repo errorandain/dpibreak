@@ -66,7 +66,7 @@ object TunSocksBridge {
         tunFd: Int,
         cacheDir: File,
         socksHost: String = "127.0.0.1",
-        socksPort: Int = 1080,
+        socksPort: Int = ByedpiJniEngine.DEFAULT_SOCKS_PORT,
     ): Boolean {
         if (isRunning()) {
             Log.e(TAG, "tun2socks is already running — stop it first")

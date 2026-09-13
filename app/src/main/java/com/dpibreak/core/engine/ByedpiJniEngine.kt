@@ -32,7 +32,7 @@ class ByedpiJniEngine : DesyncEngine {
         }
 
         /** Порт локального SOCKS5 (совпадает с -p у byedpi). */
-        const val DEFAULT_SOCKS_PORT = 1080
+        const val DEFAULT_SOCKS_PORT = 8080
 
         /** Сколько ждём открытия порта SOCKS5. */
         private const val PORT_WAIT_MS = 5_000L
