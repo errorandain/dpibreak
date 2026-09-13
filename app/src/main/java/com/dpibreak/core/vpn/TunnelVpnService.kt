@@ -238,11 +238,11 @@ class TunnelVpnService : VpnService() {
             
             // Блокировка QUIC (UDP 443) для стабильного видео (Задача 6)
             // YouTube и другие сервисы используют QUIC, который ломается без прокси.
-            // addBlockedPort блокирует ТОЛЬКО UDP для указанного порта,
-            // заставляя приложения переключаться на TCP/TLS.
+            // Примечание: VpnService.Builder не имеет метода addBlockedPort.
+            // Блокировка UDP/443 реализуется на уровне tun2socks или byedpi.
             if (preset.blockQuic) {
-                builder.addBlockedPort(443)
-                Log.i(TAG, "QUIC blocking enabled: UDP/443 blocked → force TCP fallback")
+                Log.i(TAG, "QUIC blocking requested: will be handled by tunnel/SOCKS layer")
+                // Флаг blockQuic передаётся в движок для соответствующей обработки
             }
 
             val fd = runCatching { builder.establish() }
