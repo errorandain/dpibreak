@@ -1,6 +1,7 @@
 package com.dpibreak.core.tunnel
 
 import android.util.Log
+import com.dpibreak.core.engine.ByedpiJniEngine
 import java.io.File
 
 /**
