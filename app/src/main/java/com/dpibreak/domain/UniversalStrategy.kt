@@ -12,12 +12,14 @@ data class UniversalStrategy(
     // --auto=torst: Автоматически выбирает метод (TLS Record Splitting или Fake Request) в зависимости от типа блокировки
     // --tlsrec 1+s: Разбивает первый пакет TLS на части (1 байт + остальное), ломая сигнатуру SNI
     // --disorder 1: Меняет порядок пакетов (если поддерживается ядром)
-    // --fake=-1: Отключает фейковые пакеты (стабильность на Android)
+    // --fake=1: Эмулирует неверный размер TCP окна для обхода DPI (критично для YouTube)
+    // --dnsover=https://dns.google/dns-query: Использует Google DNS для надёжного резолвинга доменов
     val arguments: List<String> = listOf(
         "--auto=torst",
         "--tlsrec=1+s",
         "--disorder=1",
-        "--fake=-1"
+        "--fake=1",
+        "--dnsover=https://dns.google/dns-query"
     ),
 
     // Блокировка QUIC (UDP 443) принудительно переводит трафик в TCP, где обход работает стабильнее
