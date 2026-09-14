@@ -15,8 +15,7 @@ data class UniversalStrategy(
     val arguments: List<String> = listOf(
         "--auto=torst",
         "--tlsrec=1+s",
-        "--disorder=1",
-        "--dnsover=https://dns.cloudflare.com/dns-query" // Встроенный DoH для надежности
+        "--disorder=1"
     ),
 
     // Блокировка QUIC (UDP 443) принудительно переводит трафик в TCP, где обход работает стабильнее
