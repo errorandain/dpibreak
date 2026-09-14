@@ -23,6 +23,10 @@ import java.net.Socket
  * остановки, отменить такую корутину нельзя (job.cancel() не прерывает нативный
  * вызов), а отложенный корутинами пул только создаёт иллюзию отмены. Поток —
  * daemon, поэтому зависшее ядро не удержит процесс от завершения.
+ * 
+ * ЗАЩИТА СОКЕТА ОТ ПОПАДАНИЯ В TUN: После запуска ядра вызывается protect(),
+ * который передаёт server_fd в VpnService.protect(). Это предотвращает попадание
+ * трафика SOCKS5-прокси в TUN-интерфейс (петля маршрутизации).
  */
 class ByedpiJniEngine : DesyncEngine {
 
@@ -51,6 +55,9 @@ class ByedpiJniEngine : DesyncEngine {
 
     /** Поток, в котором работает main() ядра. Не null — пока поток не завершён. */
     @Volatile private var coreThread: Thread? = null
+    
+    /** Дескриптор серверного сокета для защиты через VpnService.protect() */
+    @Volatile private var serverFd: Int = -1
 
     /**
      * {@inheritDoc}
@@ -68,12 +75,14 @@ class ByedpiJniEngine : DesyncEngine {
             return null
         }
         coreThread = null
+        serverFd = -1
 
         val allArgs = listOf("-p", DEFAULT_SOCKS_PORT.toString()) + args
         Log.i(TAG, "Starting byedpi with args: $allArgs")
 
         val thread = Thread {
             val rc = jniStartProxy(allArgs.toTypedArray())
+            serverFd = -1
             _isRunning.value = false
             Log.i(TAG, "byedpi main() exited with code $rc")
         }
@@ -97,6 +106,9 @@ class ByedpiJniEngine : DesyncEngine {
                     s.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
                 }
                 Log.i(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
+                // Получаем server_fd для защиты от попадания в TUN
+                serverFd = jniGetServerFd()
+                Log.d(TAG, "byedpi server_fd=$serverFd")
                 _isRunning.value = true
                 return DEFAULT_SOCKS_PORT
             } catch (_: IOException) {
@@ -109,10 +121,29 @@ class ByedpiJniEngine : DesyncEngine {
         return null
     }
 
+    /**
+     * Вызывает VpnService.protect() для server_fd.
+     * Должен вызываться из контекста VpnService после успешного старта движка.
+     * @param vpnService экземпляр VpnService для вызова protect()
+     * @return true если защита установлена успешно
+     */
+    fun protect(vpnService: android.net.VpnService): Boolean {
+        val fd = serverFd
+        return if (fd >= 0) {
+            val result = vpnService.protect(fd)
+            Log.i(TAG, "protect($fd) = $result")
+            result
+        } else {
+            Log.w(TAG, "Cannot protect: serverFd=$fd (engine not started?)")
+            false
+        }
+    }
+
     override fun stop() {
         val thread = coreThread
         if (thread == null) {
             _isRunning.value = false
+            serverFd = -1
             return
         }
 
@@ -136,11 +167,13 @@ class ByedpiJniEngine : DesyncEngine {
         if (!thread.isAlive) {
             coreThread = null
         }
+        serverFd = -1
         _isRunning.value = false
         Log.i(TAG, "byedpi engine stopped")
     }
 
     private external fun jniStartProxy(args: Array<String>): Int
+    private external fun jniGetServerFd(): Int
     private external fun jniStopProxy(): Int
     private external fun jniForceClose(): Int
 }

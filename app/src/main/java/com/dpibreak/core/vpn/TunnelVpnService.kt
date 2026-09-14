@@ -266,6 +266,14 @@ class TunnelVpnService : VpnService() {
                 return
             }
             Log.i(TAG, "byedpi SOCKS5 on 127.0.0.1:$port")
+            
+            // 2.1. Защищаем сокет byedpi от попадания в TUN-интерфейс.
+            // Это критично: без protect() трафик SOCKS5 попадает обратно в TUN,
+            // вызывая петлю маршрутизации и падение соединения.
+            if (!engine.protect(this)) {
+                Log.e(TAG, "Failed to protect byedpi socket — traffic may loop into TUN")
+            }
+            
             if (stopRequestedDuringStart()) return
 
             // 3. tun2socks: TUN → SOCKS5.
