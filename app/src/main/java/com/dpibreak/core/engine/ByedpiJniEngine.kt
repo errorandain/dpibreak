@@ -48,6 +48,12 @@ class ByedpiJniEngine : DesyncEngine {
         private const val HARD_STOP_WAIT_MS = 500L
 
         private const val TAG = "DPIBreak"
+        
+        /** Singleton instance for safe access from DiagLog */
+        @Volatile private var instance: ByedpiJniEngine? = null
+        
+        /** Get the singleton instance */
+        fun getInstance(): ByedpiJniEngine? = instance
     }
 
     private val _isRunning = MutableStateFlow(false)
@@ -58,6 +64,10 @@ class ByedpiJniEngine : DesyncEngine {
     
     /** Дескриптор серверного сокета для защиты через VpnService.protect() */
     @Volatile private var serverFd: Int = -1
+    
+    init {
+        instance = this
+    }
 
     /**
      * {@inheritDoc}
