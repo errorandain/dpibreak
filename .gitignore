@@ -1,59 +1,25 @@
-```kotlin
-# Compiled and build artifacts
-*.class
-*.jar
-*.war
-*.aar
-build/
-*.o
-*.obj
-*.so
-*.dll
-*.dylib
-
-# Dependencies
-.gradle/
-node_modules/
-venv/
-.venv/
-__pycache__/
-*.egg-info/
-
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-*.swo
-
-# Environment
-.env
-.env.local
-*.env.*
-
-# Editors
-.vscode/
-.idea/
-*.iml
-*.iws
-*.ipr
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
-
-# Java/Kotlin specific
-*.class
-*.jar
-*.war
-*.aar
-target/
-out/
-bin/
-gen/
-local.properties
+```yaml
+name: Build and Test
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    - name: Run tests
+      run: pytest tests/
+    - name: Build package
+      run: python setup.py sdist bdist_wheel
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-artifacts
+        path: dist/
 ```

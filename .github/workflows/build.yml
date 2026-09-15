@@ -30,13 +30,15 @@ jobs:
           ls -la /dev/kvm || true
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android/setup-android@v3
         with:
           cmdline-tools-version: latest
 
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
       - name: Install required SDK components
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "platforms;android-35" \
                      "build-tools;35.0.0" \
                      "cmake;3.22.1" \
