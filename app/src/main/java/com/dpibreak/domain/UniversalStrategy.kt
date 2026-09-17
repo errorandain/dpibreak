@@ -4,31 +4,32 @@ package com.dpibreak.domain
  * Универсальная стратегия обхода DPI.
  * Объединяет лучшие методы: десинхронизацию, фейковые пакеты и авто-подбор.
  * Работает для YouTube, Telegram, Discord, Instagram и большинства заблокированных ресурсов.
+ * 
+ * Ключевые параметры для YouTube:
+ * - --fake=1: Эмулирует неверный размер TCP окна (критично!)
+ * - --ttl=8: TTL фейковых пакетов (должен быть меньше реального TTL до сервера)
+ * - --auto=torst: Авто-определение типа блокировки
  */
 data class UniversalStrategy(
     val name: String = "Universal Bypass",
     
     // Основные аргументы ядра byedpi
-    // --auto=torst: Автоматически выбирает метод (TLS Record Splitting или Fake Request) в зависимости от типа блокировки
-    // --tlsrec 1+s: Разбивает первый пакет TLS на части (1 байт + остальное), ломая сигнатуру SNI
-    // --disorder 1: Меняет порядок пакетов (если поддерживается ядром)
-    // --fake=1: Эмулирует неверный размер TCP окна для обхода DPI (критично для YouTube)
-    // --dnsover=https://dns.google/dns-query: Использует Google DNS для надёжного резолвинга доменов
     val arguments: List<String> = listOf(
-        "--auto=torst",
-        "--tlsrec=1+s",
-        "--disorder=1",
-        "--fake=1",
-        "--dnsover=https://dns.google/dns-query"
+        "--auto=torst",           // Авто-режим: TLS Record Splitting или Fake Request
+        "--tlsrec=1+s",           // Разбивает первый пакет TLS (1 байт + остальное)
+        "--disorder=1",           // Меняет порядок пакетов
+        "--fake=1",               // КРИТИЧНО для YouTube: эмуляция неверного TCP окна
+        "--ttl=8",                // TTL фейковых пакетов (исчезают до достижения сервера)
+        "--dnsover=https://dns.google/dns-query"  // Google DNS для googlevideo.com
     ),
 
-    // Блокировка QUIC (UDP 443) принудительно переводит трафик в TCP, где обход работает стабильнее
+    // Блокировка QUIC (UDP 443) принудительно переводит трафик в TCP
     val blockQuic: Boolean = true,
 
-    // Hostlist пуст, так как стратегия универсальна и применяется ко всему трафику
+    // Hostlist пуст, так как стратегия универсальна
     val hostlist: List<String> = emptyList(),
 
-    // Исключения (банки, госуслуги) остаются, чтобы не ломать локальные приложения
+    // Исключения (банки, госуслуги)
     val excludedApps: List<String> = listOf(
         "ru.sberbankmobile",
         "ru.vtb.mobileapp",
