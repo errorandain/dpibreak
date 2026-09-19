@@ -16,6 +16,7 @@
  *  - jniStopProxy: мягкая остановка через shutdown(server_fd) — ровно то же
  *    действие, что обработчик SIGINT/SIGTERM в самом ядре (proxy.c:on_cancel);
  *  - jniForceClose: жёсткое закрытие сокета при зависании.
+ *  - jniGetServerFd: возвращает server_fd для защиты через VpnService.protect().
  *
  * ЗАЩИТА ОТ ДВОЙНОГО ЗАКРЫТИЯ: после выхода main() сокет server_fd уже закрыт
  * самим ядром byedpi, а номер дескриптора мог быть переиспользован другими
@@ -107,6 +108,14 @@ Java_com_dpibreak_core_engine_ByedpiJniEngine_jniStartProxy(JNIEnv *env,
     free(argv);
 
     return rc;
+}
+
+/* Возвращает server_fd для защиты через VpnService.protect() */
+JNIEXPORT jint JNICALL
+Java_com_dpibreak_core_engine_ByedpiJniEngine_jniGetServerFd(
+        __attribute__((unused)) JNIEnv *env,
+        __attribute__((unused)) jobject thiz) {
+    return server_fd;
 }
 
 /* Мягкая остановка: shutdown выводит main() из цикла событий. Безопасна повторно. */
