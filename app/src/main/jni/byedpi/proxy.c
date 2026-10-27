@@ -35,6 +35,9 @@
     #ifdef __linux__
         /* For SO_ORIGINAL_DST only (which is 0x50) */
         #include "linux/netfilter_ipv4.h"
+        /* Для проверки наличия IPv6-маршрута по умолчанию (v6_route_ok) */
+        #include <linux/rtnetlink.h>
+        #include <stdbool.h>
         #ifndef IP6T_SO_ORIGINAL_DST
         #define IP6T_SO_ORIGINAL_DST SO_ORIGINAL_DST
         #endif
@@ -130,7 +133,12 @@ static int resolve(const char *chost, int len,
     struct addrinfo hints = {0}, *res = 0;
     
     hints.ai_socktype = type;
-    hints.ai_flags = AI_ADDRCONFIG;
+    // ВАЖНО (Android + VpnService): флаг AI_ADDRCONFIG НЕ ставим (в отличие от
+    // эталонного десктопного ByeDPI). Он фильтрует результаты getaddrinfo по
+    // «постоянным» (permanent) адресам интерфейсов; на Android у TUN адрес /32
+    // или /128 динамический, и с этим флагом резолв чистых IPv6-хостов
+    // (Twitch pusher/mediaserver, QUIC) возвращает EAI_ADDRFAMILY — соединение
+    // отваливается ещё до создания сокета.
     if (!params.resolve)
         hints.ai_flags |= AI_NUMERICHOST;
     // На Android VpnService: AI_ADDRCONFIG опирается на «постоянные» адреса
@@ -386,6 +394,59 @@ static int tls_get_addr(
 }
 
     
+// Доступна ли процессу маршрутизация IPv6 ВНЕ туннеля. Сокеты движка защищены
+// VpnService.protect() и ходят через физический интерфейс; на многих мобильных
+// сетях связность только IPv4, и тогда connect() к AAAA-мишени гарантированно
+// даёт ENETUNREACH/EAFNOSUPPORT. getaddrinfo без AI_ADDRCONFIG (см. resolve())
+// мог вернуть сначала именно AAAA — так ломались Twitch/стримы после включения
+// обхода. Проверка дешёвая и не требует привилегий: создаём защищённый
+// неблокирующий UDP-сокет AF_INET6 и пробуем connect() на адрес из RFC 6666
+// (IPv6 DISCARD-ONLY префикс, зарезервирован под «мусор», реально ничего не
+// получает). Если ядро знает v6-маршрут — connect вернёт 0 или EINPROGRESS;
+// если стека/маршрута нет — сразу ошибка. bind/connect у UDP-сокетов вне
+// туннеля безопасны: трафика мы не отправляем.
+static bool v6_route_ok(void)
+{
+    const int fd = socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    // Помечаем сокет защищённым, чтобы сам зонд не ушёл в TUN (петля/ложный
+    // успех через туннельный маршрут ::/0).
+    socket_mod(fd);
+    struct sockaddr_in6 sa = {0};
+    sa.sin6_family = AF_INET6;
+    sa.sin6_port = htons(9); // discard
+    inet_pton(AF_INET6, "100::", &sa.sin6_addr); // RFC 6666 discard-only
+    const int err = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+    const int e = get_e();
+    close(fd);
+    return err == 0 || e == EINPROGRESS || e == EAGAIN || e == EALREADY;
+}
+
+
+// Анти-петля/IPv6: чистая IPv6-мишень при отсутствии v6-маршрута вне туннеля
+// заменяется на A-запись того же хоста. dst уже содержит порт — сохраняем его.
+static void prefer_v4(const char *chost, int len, union sockaddr_u *dst)
+{
+    struct addrinfo hints = {0}, *res = 0;
+    char host[len + 1];
+    host[len] = 0;
+    memcpy(host, chost, len);
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_family = AF_INET;
+    const uint16_t port = dst->in.sin_port;
+    if (!getaddrinfo(host, 0, &hints, &res) && res) {
+        memcpy(dst, res->ai_addr, SA_SIZE(res->ai_addr));
+        dst->in.sin_port = port;
+        LOG(LOG_S, "v6 unreachable, retried %s as IPv4\n", host);
+    }
+    if (res) {
+        freeaddrinfo(res);
+    }
+}
+
+
 static int remote_sock(union sockaddr_u *dst, int type)
 {
     // Семейство исходящего сокета выбираем по адресу НАЗНАЧЕНИЯ, а не по
