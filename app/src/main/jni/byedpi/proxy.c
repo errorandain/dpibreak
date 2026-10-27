@@ -128,6 +128,26 @@ static inline int nb_socket(int domain, int type)
 
 
 static int resolve(const char *chost, int len, 
+        union sockaddr_u *addr, int type);
+
+// Проверка наличия IPv6-маршрута ВНЕ туннеля (реализация — ниже, перед
+// remote_sock). Объявлена заранее, чтобы resolve() мог на неё опираться.
+static bool v6_route_ok(void);
+
+// Кэш результата v6_route_ok(): зонд дешёвый, но вызывается на каждый резолв
+// с AAAA-результатом, поэтому вычисляем один раз за процесс.
+static int v6_available = -1; // -1 = unknown, 0 = no, 1 = yes
+
+static inline bool ipv6_can_reach(void)
+{
+    if (v6_available < 0) {
+        v6_available = v6_route_ok();
+    }
+    return v6_available;
+}
+
+
+static int resolve(const char *chost, int len, 
         union sockaddr_u *addr, int type) 
 {
     struct addrinfo hints = {0}, *res = 0;
@@ -156,6 +176,23 @@ static int resolve(const char *chost, int len,
     
     if (getaddrinfo(host, 0, &hints, &res) || !res) {
         return -1;
+    }
+    // Если getaddrinfo вернул IPv6-адрес, а физической v6-связности вне
+    // туннеля нет (типично для мобильных сетей), connect() к AAAA даст
+    // ENETUNREACH и соединение умрёт (симптом: «интернет не работает»,
+    // стримы/Twitch встают). Подменяем на A-запись того же имени.
+    if (res->ai_family == AF_INET6 && !ipv6_can_reach()) {
+        freeaddrinfo(res);
+        res = 0;
+        struct addrinfo v4hints = {0};
+        v4hints.ai_socktype = type;
+        v4hints.ai_family = AF_INET;
+        if (!params.resolve)
+            v4hints.ai_flags |= AI_NUMERICHOST;
+        if (getaddrinfo(host, 0, &v4hints, &res) || !res) {
+            return -1;
+        }
+        LOG(LOG_S, "resolve: %s -> forced IPv4 (no v6 route)\n", host);
     }
     memcpy(addr, res->ai_addr, SA_SIZE(res->ai_addr));
     freeaddrinfo(res);
@@ -425,26 +462,10 @@ static bool v6_route_ok(void)
 }
 
 
-// Анти-петля/IPv6: чистая IPv6-мишень при отсутствии v6-маршрута вне туннеля
-// заменяется на A-запись того же хоста. dst уже содержит порт — сохраняем его.
-static void prefer_v4(const char *chost, int len, union sockaddr_u *dst)
-{
-    struct addrinfo hints = {0}, *res = 0;
-    char host[len + 1];
-    host[len] = 0;
-    memcpy(host, chost, len);
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_family = AF_INET;
-    const uint16_t port = dst->in.sin_port;
-    if (!getaddrinfo(host, 0, &hints, &res) && res) {
-        memcpy(dst, res->ai_addr, SA_SIZE(res->ai_addr));
-        dst->in.sin_port = port;
-        LOG(LOG_S, "v6 unreachable, retried %s as IPv4\n", host);
-    }
-    if (res) {
-        freeaddrinfo(res);
-    }
-}
+// prefer_v4() интегрирован непосредственно в resolve() (см. выше): при AAAA-
+// результате и отсутствии v6-маршрута берётся A-запись того же имени. Отдельная
+// функция не нужна — все точки резолва (SOCKS5 ATYP=DOMAIN, HTTP CONNECT,
+// raw-TLS SNI, Shadowsocks) проходят через resolve().
 
 
 static int remote_sock(union sockaddr_u *dst, int type)
