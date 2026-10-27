@@ -487,8 +487,8 @@ private class ProtectSocketServer(
 
     /**
      * Протокол byedpi (extend.c): клиент шлёт 1 байт + fd в SCM_RIGHTS,
-     * ждёт 1 байт ответа. [LocalSocket.FileDescriptor] приходит уже дублированным
-     * в наше адресное пространство; закрываем его сами (кто получил — тот и закрывает).
+     * ждёт 1 байт ответа. Полученный fd уже дублирован в наше адресное
+     * пространство; закрываем его сами (кто получил — тот и закрывает).
      */
     private fun handleClient(client: LocalSocket) {
         val input = client.inputStream
@@ -497,15 +497,20 @@ private class ProtectSocketServer(
         // Байт-маркер ('1') перед fd — проглатываем, он ничего не значит.
         if (input.read() == -1) return
 
-        val received = client.takeFileDescriptor() ?: return
+        // getAncillaryFileDescriptors() возвращает fd'и из SCM_RIGHTS последнего
+        // принятого пакета; если пакет их не нёс — null/пустой массив.
+        val received = client.ancillaryFileDescriptors?.firstOrNull() ?: return
         var ok = false
         try {
-            ok = vpnService.protect(received.fd)
-            if (!ok) Log.w(TAG, "VpnService.protect(${received.fd}) returned false")
+            // ParcelFileDescriptor.dup() делает dup() системного вызова над
+            // полученным fd, поэтому close() у PFD закрывает реальный дескриптор,
+            // даже когда внутренняя «власть» оригинала уже потеряна.
+            ParcelFileDescriptor.dup(received).use { pfd ->
+                ok = vpnService.protect(pfd.detachFd())
+                if (!ok) Log.w(TAG, "VpnService.protect() returned false")
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "protect() threw", t)
-        } finally {
-            runCatching { received.close() }
         }
         // Ядро считает соединение живым только при ответе 1; на 0 оно закрывает сокет.
         output.write(if (ok) 1 else 0)
