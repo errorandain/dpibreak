@@ -419,6 +419,7 @@ class TunnelVpnService : VpnService() {
         /** Имя Unix-сокета сервера protect() в cacheDir (путь < 92 символов — лимит sun_path). */
         private const val PROTECT_SOCKET_NAME = "pr.sock"
 
+
         /** Первая проверка живости — через секунду после старта. */
         private const val FIRST_CHECK_DELAY_MS = 1000L
 
@@ -492,31 +493,48 @@ private class ProtectSocketServer(
     }
 
     /**
-     * Протокол byedpi (extend.c): клиент шлёт 1 байт + fd в SCM_RIGHTS,
-     * ждёт 1 байт ответа. Полученный fd уже дублирован в наше адресное
-     * пространство; закрываем его сами (кто получил — тот и закрывает).
+     * Протокол byedpi (extend.c:protect()): клиент шлёт ОДИН сообщение
+     * sendmsg(), где одновременно идут 1 байт-маркер ('1') и fd сокета в
+     * ancillary-данных SCM_RIGHTS, затем ждёт 1 байт ответа (1 = успех).
+     *
+     * Публичный Android API (LocalSocket) НЕ даёт принять SCM_RIGHTS:
+     * getAncillaryFileDescriptors() всегда возвращает null — внутри AOSP
+     * receiveRights() передаёт в native recvmsg нулевой iovec (0 байт), а
+     * ядро Linux丢弃 ancillary-данные, если в datagram нет ни одного байта.
+     * Поэтому приём fd реализован в нативном коде (native-lib.c): там обычный
+     * recvmsg с реальным буфером. Здесь только запрашиваем fd и вызываем
+     * VpnService.protect().
      */
     private fun handleClient(client: LocalSocket) {
         val input = client.inputStream
         val output = client.outputStream
 
-        // Байт-маркер ('1') перед fd — проглатываем, он ничего не значит.
+        // Байт-маркер ('1') — читаем его ИМЕННО здесь, до nativeRecvProtectedFd:
+        // nativный recvmsg заберёт из очереди соединения только то, что придёт
+        // ПОСЛЕ этого чтения; порядок гарантирует, что мы примем ровно тот
+        // сегмент, который ждёт ответ.
         if (input.read() == -1) return
 
-        // getAncillaryFileDescriptors() возвращает fd'и из SCM_RIGHTS последнего
-        // принятого пакета; если пакет их не нёс — null/пустой массив.
-        val received = client.ancillaryFileDescriptors?.firstOrNull() ?: return
-        var ok = false
-        try {
-            // ParcelFileDescriptor.dup() делает dup() системного вызова над
-            // полученным fd, поэтому close() у PFD закрывает реальный дескриптор,
-            // даже когда внутренняя «власть» оригинала уже потеряна.
-            ParcelFileDescriptor.dup(received).use { pfd ->
-                ok = vpnService.protect(pfd.detachFd())
-                if (!ok) Log.w(TAG, "VpnService.protect() returned false")
-            }
+        val connFd = try {
+            nativeRecvProtectedFd(client.fileDescriptor)
         } catch (t: Throwable) {
-            Log.e(TAG, "protect() threw", t)
+            Log.e(TAG, "native recv of protected fd failed", t)
+            -1
+        }
+        var ok = false
+        if (connFd >= 0) {
+            try {
+                // VpnService.protect(int) помечает сокет как защищённый (вне TUN)
+                // и НЕ забирает владение fd — закрываем сами в finally.
+                ok = vpnService.protect(connFd)
+                if (!ok) Log.w(TAG, "VpnService.protect() returned false")
+            } catch (t: Throwable) {
+                Log.e(TAG, "protect() threw", t)
+            } finally {
+                closeNativeFd(connFd)
+            }
+        } else {
+            Log.w(TAG, "no fd received on protect socket (proto mismatch?)")
         }
         // Ядро считает соединение живым только при ответе 1; на 0 оно закрывает сокет.
         output.write(if (ok) 1 else 0)
@@ -527,5 +545,21 @@ private class ProtectSocketServer(
     fun shutdown() {
         runCatching { serverSocket.close() }
         runCatching { File(socketPath).delete() }
+    }
+
+    companion object {
+        /**
+         * Приём fd'а из SCM_RIGHTS на данном Unix-соединении (см. native-lib.c).
+         * Возвращает системный fd (владелец — вызывающий, закрыть [closeNativeFd])
+         * или -1, если сообщение не содержало дескриптор.
+         */
+        private external fun nativeRecvProtectedFd(fd: java.io.FileDescriptor): Int
+
+        /** Закрывает fd, полученный из [nativeRecvProtectedFd]. */
+        private external fun closeNativeFd(fd: Int)
+
+        init {
+            System.loadLibrary("dpibreak")
+        }
     }
 }

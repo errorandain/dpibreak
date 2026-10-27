@@ -133,3 +133,67 @@ Java_com_dpibreak_core_engine_ByedpiJniEngine_jniForceClose(
     LOGE("jniForceClose: byedpi ignored soft stop, closing listen socket");
     return close(server_fd);
 }
+
+/*
+ * Приём fd'а из SCM_RIGHTS для сервера protect() (TunnelVpnService).
+ *
+ * Почему в C, а не на Java: публичный LocalSocket.getAncillaryFileDescriptors()
+ * в AOSP вызывает receiveRights(fd, NULL, 0), т.е. recvmsg с нулевым iovec.
+ * Ядро Linux при нулевой длине данных отбрасывает ancillary-блок (SCM_RIGHTS
+ * доставляется только вместе с хотя бы одним байтом payload), поэтому Java-API
+ * никогда не возвращает принятые дескрипторы. byebye-dpi обходит это своим
+ * форком LocalSocket; мы решаем задачу маленьким нативным recvmsg.
+ *
+ * Протокол клиента (byedpi extend.c:protect): одно сообщение sendmsg —
+ * 1 байт маркера + fd в SCM_RIGHTS. Здесь ожидаем ровно такое же сообщение.
+ */
+#include <sys/un.h> /* только для размеров cmsg-буфера, сокетов не создаём */
+
+JNIEXPORT jint JNICALL
+Java_com_dpibreak_core_vpn_TunnelVpnService_nativeRecvProtectedFd(
+        JNIEnv *env, __attribute__((unused)) jobject thiz, jobject fdObj) {
+
+    jclass fdClass = (*env)->FindClass(env, "java/io/FileDescriptor");
+    if (!fdClass) return -1;
+    jfieldID fid = (*env)->GetFieldID(env, fdClass, "descriptor", "I");
+    if (!fid) return -1;
+    int listen_fd = (*env)->GetIntField(env, fdObj, fid);
+
+    char buf[CMSG_SPACE(sizeof(int) * 8)];
+    char marker;
+    struct iovec io = { .iov_base = &marker, .iov_len = 1 };
+    struct msghdr msg = { 0 };
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = buf;
+    msg.msg_controllen = sizeof(buf);
+
+    /* Клиент шлёт сообщение и сразу ждёт ответ — блокирующее чтение безопасно
+     * (вызывается из dedicated accept-потока после прочтения маркера Java-сторой;
+     * если очередь пуста — значит клиент прислал только байт без fd: дожидаемся
+     * следующего сообщения с таймаутом, чтобы поток не завис навсегда). */
+    struct timeval tv = { .tv_sec = 2 };
+    setsockopt(listen_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    ssize_t n = recvmsg(listen_fd, &msg, 0);
+    if (n < 1) {
+        return -1; /* нет данных / таймаут / разрыв соединения */
+    }
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+            cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+            int received;
+            memcpy(&received, CMSG_DATA(cmsg), sizeof(received));
+            return received; /* владение fd переходит к вызывающему (Kotlin закроет) */
+        }
+    }
+    return -1; /* сообщение без SCM_RIGHTS */
+}
+
+/* close() для fd, полученного выше (обходимо из Kotlin напрямую нельзя). */
+JNIEXPORT void JNICALL
+Java_com_dpibreak_core_vpn_TunnelVpnService_closeNativeFd(
+        __attribute__((unused)) JNIEnv *env,
+        __attribute__((unused)) jobject thiz, jint fd) {
+    if (fd >= 0) close(fd);
+}
