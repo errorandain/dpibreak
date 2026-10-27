@@ -3,6 +3,8 @@ package com.dpibreak.core
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.dpibreak.core.vpn.TunnelVpnService
+import com.dpibreak.domain.Presets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -12,8 +14,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import com.dpibreak.core.vpn.TunnelVpnService
-import com.dpibreak.domain.Presets
 
 private const val TAG = "DPIBreak"
 
@@ -21,8 +21,7 @@ private const val TAG = "DPIBreak"
  * Состояние VPN-сервиса.
  *
  * [ServiceState.Starting] — команда запустить отдана, сервис ещё не подтвердил,
- * что конвейер собран. Именно здесь раньше возникал рассинхрон: состояние сразу
- * ставили Active, и при медленном/неудачном старте UI врал пользователю.
+ * что конвейер собран.
  */
 sealed class ServiceState {
     object Idle : ServiceState()
@@ -47,6 +46,7 @@ object ServiceManager {
     /** Сколько ждём, пока сервис подтвердит остановку. */
     private const val STOP_TIMEOUT_MS = 10_000L
 
+    private val lock = Any()
     private val _state = MutableStateFlow<ServiceState>(ServiceState.Idle)
     val state: StateFlow<ServiceState> = _state.asStateFlow()
 
@@ -55,7 +55,7 @@ object ServiceManager {
      * [ServiceState.Starting] — тоже «включено», иначе двойной тап поднимет второй сервис.
      */
     val isRunning: Boolean
-        get() = _state.value is ServiceState.Starting || _state.value is ServiceState.Active
+        get() = _state.value.let { it is ServiceState.Starting || it is ServiceState.Active }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -73,10 +73,14 @@ object ServiceManager {
      * Запускает VPN-сервис через startForegroundService.
      */
     fun start(context: Context) {
-        if (isRunning) return
+        synchronized(lock) {
+            if (isRunning) return
+            timeoutJob?.cancel()
+            timeoutJob = null
+            _state.value = ServiceState.Starting
+        }
 
         val appContext = context.applicationContext
-        _state.value = ServiceState.Starting
 
         // Выбранный пресет передаётся в сервис аргументами движка
         val preset = Presets.getSelected(appContext)
@@ -104,13 +108,18 @@ object ServiceManager {
         armTimeout(
             START_TIMEOUT_MS,
             onTimeout = {
-                if (_state.value is ServiceState.Starting) {
-                    updateState(
-                        ServiceState.Error(
+                val timedOut = synchronized(lock) {
+                    if (_state.value is ServiceState.Starting) {
+                        _state.value = ServiceState.Error(
                             "Сервис не подтвердил запуск за " +
                                 "${START_TIMEOUT_MS / 1000} с — попробуйте выключить и включить снова"
                         )
-                    )
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (timedOut) {
                     // Страховка: если сервис живой, но завис, не оставляем его висеть.
                     runCatching {
                         appContext.stopService(
@@ -144,9 +153,11 @@ object ServiceManager {
         armTimeout(
             STOP_TIMEOUT_MS,
             onTimeout = {
-                if (isRunning) {
-                    Log.w(TAG, "Service did not confirm stop — forcing Idle")
-                    updateState(ServiceState.Idle)
+                synchronized(lock) {
+                    if (isRunning) {
+                        Log.w(TAG, "Service did not confirm stop — forcing Idle")
+                        _state.value = ServiceState.Idle
+                    }
                 }
             }
         )
@@ -157,17 +168,26 @@ object ServiceManager {
      * Любой явный сигнал от сервиса снимает страховочный таймер.
      */
     fun updateState(newState: ServiceState) {
-        timeoutJob?.cancel()
-        timeoutJob = null
-        _state.value = newState
+        synchronized(lock) {
+            timeoutJob?.cancel()
+            timeoutJob = null
+            _state.value = newState
+        }
     }
 
     private fun armTimeout(timeoutMs: Long, onTimeout: suspend () -> Unit) {
-        timeoutJob?.cancel()
-        timeoutJob = scope.launch {
-            delay(timeoutMs)
-            timeoutJob = null
-            onTimeout()
+        synchronized(lock) {
+            timeoutJob?.cancel()
+            val job = scope.launch {
+                delay(timeoutMs)
+                synchronized(lock) {
+                    if (timeoutJob === coroutineContext[Job]) {
+                        timeoutJob = null
+                    }
+                }
+                onTimeout()
+            }
+            timeoutJob = job
         }
     }
 }

@@ -17,6 +17,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -29,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -45,9 +47,8 @@ import com.dpibreak.domain.Presets
 class MainActivity : ComponentActivity() {
 
     /**
-     * Системный диалог разрешения VPN. Раньше результат игнорировался: после
-     * согласия приходилось нажимать кнопку «Включить» второй раз, а при отказе
-     * статус так и оставался «Обход выключен» без объяснения причины.
+     * Системный диалог разрешения VPN: при согласии сразу запускаем туннель,
+     * при отказе показываем понятную ошибку.
      */
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -63,7 +64,7 @@ class MainActivity : ComponentActivity() {
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
+    ) { _ ->
         // Разрешение на уведомления получено или отклонено — не критично:
         // foreground-сервис работает и без него, просто без уведомления.
     }
@@ -88,18 +89,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Запрашивает разрешение VPN и только потом запускает сервис. */
+    /** Переключатель кнопки: если обход активен — выключаем напрямую, иначе проверяем VPN и включаем. */
+    internal fun onToggleClick() {
+        if (ServiceManager.isRunning) {
+            ServiceManager.stop(this)
+        } else {
+            requestVpnAndStart()
+        }
+    }
+
+    /** Запрашивает разрешение VPN (при необходимости) и запускает сервис. */
     internal fun requestVpnAndStart() {
         val prepareIntent = VpnService.prepare(this)
         if (prepareIntent == null) {
-            ServiceManager.toggle(this)
+            ServiceManager.start(this)
             return
-        }
-        // Разрешения нет — значит рабочий туннеля точно отсутствует (например,
-        // отзывали в настройках). Возвращаем UI в Idle, иначе start() после
-        // диалога увидит «уже запущено» и промолчит.
-        if (ServiceManager.isRunning) {
-            ServiceManager.updateState(ServiceState.Idle)
         }
         vpnPermissionLauncher.launch(prepareIntent)
     }
@@ -124,6 +128,8 @@ fun MainScreen(activity: MainActivity) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .safeDrawingPadding()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -174,7 +180,7 @@ fun MainScreen(activity: MainActivity) {
             Spacer(modifier = Modifier.height(24.dp))
 
             Button(
-                onClick = { activity.requestVpnAndStart() },
+                onClick = { activity.onToggleClick() },
                 enabled = isButtonEnabled
             ) {
                 Text(

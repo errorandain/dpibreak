@@ -4,8 +4,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.LocalServerSocket
-import android.net.LocalSocket
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -34,15 +32,14 @@ private const val TAG = "DPIBreak"
  *   приложения → TUN-интерфейс → tun2socks (hev-socks5-tunnel, vendored)
  *   → SOCKS5 (byedpi, vendored) → интернет с десинхронизацией DPI.
  *
- * Порядок запуска: startForeground → TUN → движок byedpi → tun2socks.
+ * Порядок запуска: startForeground → TUN → ProtectSocketServer → движок byedpi → tun2socks.
  * Порядок остановки — строго обратный.
  *
  * ### Почему всё делает один сериализованный поток ([worker])
- * Раньше запуск шёл в одной корутине, а остановка — в другой, и они могли
- * пересечься: остановка закрывала дескриптор TUN, пока запуск продолжал с ним
- * работать и выставлял статус Active (UI «работает», интернета нет; закрытый fd
- * к тому же мог быть переиспользован другим потоком). Один поток-очередь делает
- * такие гонки невозможными: команды выполняются строго по одной.
+ * Запуск и разборка выполняются строго по очереди в одном потоке [worker],
+ * чтобы исключить гонки за дескриптор TUN и нативные потоки. При этом сигнал
+ * [stopping] выставляется сразу при приходе команды остановки — если конвейер
+ * ещё поднимается, он прервётся между этапами, не дожидаясь полного таймаута.
  *
  * ### Почему нельзя блокировать главный поток
  * `TProxyStopService()` (join потока туннеля) и остановка движка (до 2,5 с) —
@@ -60,8 +57,15 @@ class TunnelVpnService : VpnService() {
     /** Аргументы движка от выбранного пресета (приходят с ACTION_START). */
     @Volatile private var engineArgs: List<String>? = null
 
-    /** Идёт ли сейчас сборка конвейера (нужно для осмысленных сообщений в watchdog). */
+    /** Идёт ли сейчас сборка конвейера (нужно для осмысленных проверок в watchdog). */
     @Volatile private var startingTunnel = false
+
+    /**
+     * Должен ли туннель быть запущен согласно последней команде, пришедшей в сервис.
+     * Защищает быстрый сценарий «Выкл → Вкл»: старая остановка не вызовет stopSelf(),
+     * если следом уже пришёл новый ACTION_START.
+     */
+    @Volatile private var desiredRunning = false
 
     private val engine = ByedpiJniEngine()
 
@@ -82,7 +86,7 @@ class TunnelVpnService : VpnService() {
 
     @Volatile private var watchdogTask: ScheduledFuture<*>? = null
 
-    /** Защита от повторного входа в остановку (кнопка + onDestroy + onRevoke + watchdog). */
+    /** Сигнал отмены для прерывания идущего запуска при нажатии «Выключить». */
     private val stopping = AtomicBoolean(false)
 
     /** Защита от параллельной разборки конвейера двумя потоками. */
@@ -90,7 +94,7 @@ class TunnelVpnService : VpnService() {
 
     /**
      * Unix-сокет сервера protect() (см. [ProtectSocketServer]). Не null — пока
-     * конвейер собран. Останавливается в [cleanup] перед закрытием TUN.
+     * конвейер собран. Останавливается в [cleanup] после движка и перед закрытием TUN.
      */
     @Volatile private var protectServer: ProtectSocketServer? = null
 
@@ -102,38 +106,47 @@ class TunnelVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 1. Любую команду — в первую очередь выводим сервис на передний план.
-        //    Требование Android 8+: после startForegroundService() обязан быть
-        //    startForeground() в пределах ~5 с. Отдельно важен null-intent:
-        //    при START_STICKY система пересылает именно null-интент после убийства
-        //    процесса, и раньше мы в этом случае startForeground() не вызывали вовсе
-        //    → ForegroundServiceDidNotStartInTimeException (вылет на Samsung).
-        if (!startInForeground()) {
-            return START_NOT_STICKY
-        }
-
         when (intent?.action) {
             ACTION_START -> {
-                engineArgs = intent?.getStringArrayListExtra(EXTRA_ENGINE_ARGS)
+                if (!startInForeground()) {
+                    return START_NOT_STICKY
+                }
+                engineArgs = intent.getStringArrayListExtra(EXTRA_ENGINE_ARGS)
+                desiredRunning = true
+                stopping.set(false)
                 worker.execute { startTunnel() }
+                return START_STICKY
             }
 
-            // Перерождение сервиса системой: пресет берём из сохранённых настроек,
-            // разрешение VPN при этом не сбрасывается — конвейер можно поднять снова.
+            // Перерождение сервиса системой после убийства процесса: пресет берём
+            // из сохранённых настроек; обязательно сразу вызываем startForeground().
             null -> {
+                if (!startInForeground()) {
+                    return START_NOT_STICKY
+                }
                 Log.i(TAG, "Service redelivered with null intent — resuming tunnel")
                 engineArgs = null
+                desiredRunning = true
+                stopping.set(false)
                 worker.execute { startTunnel() }
+                return START_STICKY
             }
 
-            ACTION_STOP -> worker.execute { stopTunnel() }
+            ACTION_STOP -> {
+                desiredRunning = false
+                stopping.set(true)
+                worker.execute { stopTunnel() }
+                return START_NOT_STICKY
+            }
 
             else -> {
-                Log.w(TAG, "Unknown action '${intent?.action}' — stopping")
+                Log.w(TAG, "Unknown action '${intent.action}' — stopping")
+                desiredRunning = false
+                stopping.set(true)
                 worker.execute { stopTunnel() }
+                return START_NOT_STICKY
             }
         }
-        return START_STICKY
     }
 
     /**
@@ -156,6 +169,7 @@ class TunnelVpnService : VpnService() {
         true
     } catch (t: Throwable) {
         Log.e(TAG, "startForeground() failed", t)
+        desiredRunning = false
         ServiceManager.updateState(
             ServiceState.Error(
                 "Система запретила foreground-режим (${t.javaClass.simpleName}). " +
@@ -169,17 +183,17 @@ class TunnelVpnService : VpnService() {
     /**
      * Поднимает весь конвейер. Выполняется ТОЛЬКО на [worker].
      * О любой ошибке сообщает через [ServiceManager] — текст виден на главном
-     * экране и сильно упрощает диагностику (пользователь без adb тоже поймёт, что не так).
+     * экране и сильно упрощает диагностику.
      */
     private fun startTunnel() {
+        if (!desiredRunning || stopping.get()) {
+            Log.w(TAG, "Stop requested before start — skipping")
+            cleanup(restoreIdle = !desiredRunning)
+            return
+        }
         if (tunInterface != null) {
             Log.w(TAG, "Tunnel already running")
             ServiceManager.updateState(ServiceState.Active)
-            return
-        }
-        if (stopping.get()) {
-            Log.w(TAG, "Stop requested — skipping start")
-            ServiceManager.updateState(ServiceState.Idle)
             return
         }
         startingTunnel = true
@@ -187,34 +201,16 @@ class TunnelVpnService : VpnService() {
             Log.i(TAG, "Starting tunnel pipeline…")
 
             // 1. TUN-интерфейс через VpnService.Builder (без root).
-            //    Настройки повторяют проверенный эталон (ByeByeDPI): адрес /32,
-            //    маршрут по умолчанию, DNS.
-            //    ВАЖНО про анти-петлю: addDisallowedApplication НЕ исключает наше
-            //    приложение — он лишь запрещает system apps использовать наш туннель.
-            //    Исключение собственного процесса из VPN делает только
-            //    VpnService.protect() для каждого исходящего сокета движка
-            //    (сервер protect(), шаг 2). Поэтому disallowed не используем:
-            //    на части OEM-оболочек он ломает сам запрос VPN-разрешения.
-            //    MTU не задаём: при переданном fd туннель использует его только как
-            //    размер буфера чтения, на интерфейс не влияет.
-            //    establish() может бросить SecurityException, если разрешение VPN
-            //    отозвали в момент вызова (OEM-оболочки), — поэтому в runCatching.
-            // Анти-петля: туннель перехватывает ВЕСЬ трафик приложения, кроме
-            // сокетов, помеченных VpnService.protect() (сервер protect(), шаг 2).
-            // Поэтому own-traffic bypass НЕ включаем: addDisallowedApplication
-            // не действует на собственное приложение, а addAllowedApplication
-            // выгнал бы весь трафик из туннеля (обход перестал бы работать).
+            //    Анти-петля обеспечивается сервером protect() на шаге 2: каждое
+            //    исходящее в интернет соединение byedpi помечается VpnService.protect().
             val fd = runCatching {
                 Builder()
                     .setSession("DPIBreak")
                     .addAddress("10.111.0.2", 32)
                     .addRoute("0.0.0.0", 0)
-                    // IPv6: добавляем адрес fd00::2/128 и маршрут ::/0, чтобы
-                    // v6-трафик (в т.ч. Twitch/стримы на IPv6-сетях) тоже шёл
-                    // через туннель, а не мимо него. byedpi принимает v6-мишены
-                    // (baddr по умолчанию "::"), tun2socks проксирует их по
-                    // SOCKS5 ATYP=IPv6. Если устройство/сеть без IPv6 — Android
-                    // просто игнорирует v6-маршрут, ошибок не будет.
+                    // IPv6: адрес fd00::2/128 и маршрут ::/0, чтобы v6-трафик
+                    // тоже шёл через туннель, а не мимо него. Если сеть без IPv6,
+                    // Android просто не использует v6-маршрут.
                     .addAddress("fd00::2", 128)
                     .addRoute("::", 0)
                     .addDnsServer("1.1.1.1")
@@ -246,17 +242,14 @@ class TunnelVpnService : VpnService() {
             if (stopRequestedDuringStart()) return
 
             // 3. Движок byedpi: локальный SOCKS5 на 127.0.0.1.
-            //    Аргументы — от пресета, выбранного в UI (или сохранённого,
-            //    если сервис перезапущен системой с null-intent).
             //    -P <path>: каждое исходящее соединение ядро маркирует через
-            //    VpnService.protect() (передача fd по Unix-сокету) — трафик
-            //    движка идёт мимо TUN, петли нет.
+            //    VpnService.protect() (передача fd по Unix-сокету в файловой системе).
             val presetArgs = engineArgs ?: Presets.getSelected(this).byedpiArgs
             Log.i(TAG, "Engine preset args: $presetArgs")
             val port = engine.start(listOf("-i", "127.0.0.1", "-P", protectPath) + presetArgs)
             if (port == null) {
                 abort(
-                    "Движок byedpi не запустился (порт 1080 не открылся). " +
+                    "Движок byedpi не запустился (порт ${ByedpiJniEngine.DEFAULT_SOCKS_PORT} не открылся). " +
                         "В logcat ищите тег proxy — там причина."
                 )
                 return
@@ -271,14 +264,14 @@ class TunnelVpnService : VpnService() {
             }
 
             // 5. Готово. Дальше за состоянием следит watchdog.
-            Log.i(TAG, "Pipeline is UP: TUN → byedpi:$port → tun2socks")
+            Log.i(TAG, "Pipeline is UP: TUN → tun2socks → byedpi:$port")
             ServiceManager.updateState(ServiceState.Active)
             armWatchdog()
         } finally {
             startingTunnel = false
-            // Если остановка пришла, пока мы поднимали конвейер, очередь уже
-            // выполнила разборку — на всякий случай повторяем (cleanup идемпотентен).
-            if (stopping.get()) cleanup(restoreIdle = true)
+            if (stopping.get() && !desiredRunning) {
+                cleanup(restoreIdle = true)
+            }
         }
     }
 
@@ -287,34 +280,30 @@ class TunnelVpnService : VpnService() {
      * пока мы ждали порт SOCKS5. Возвращает true, если дальше идти нельзя.
      */
     private fun stopRequestedDuringStart(): Boolean {
-        if (!stopping.get()) return false
+        if (!stopping.get() && desiredRunning) return false
         Log.w(TAG, "Stop requested during start — rolling back the started part")
-        cleanup(restoreIdle = true)
+        cleanup(restoreIdle = !desiredRunning)
         return true
     }
 
     /** Провал на одном из этапов запуска: человекочитаемая ошибка + разборка. */
     private fun abort(message: String) {
         Log.e(TAG, message)
+        desiredRunning = false
         // restoreIdle = false: не затираем текст ошибки, который только что выставили.
         ServiceManager.updateState(ServiceState.Error(message))
         cleanup(restoreIdle = false)
     }
 
     /**
-     * Штатная остановка. Только через [worker] (сериализация) и только один раз.
+     * Штатная остановка на потоке [worker].
      */
     private fun stopTunnel() {
-        if (!stopping.compareAndSet(false, true)) {
-            Log.i(TAG, "Stop already in progress — ignoring repeat")
-            return
-        }
-        cleanup(restoreIdle = true)
-        stopping.set(false)
+        cleanup(restoreIdle = !desiredRunning)
     }
 
     /**
-     * Разбор конвейера в обратном порядке: tun2socks → движок → TUN.
+     * Разбор конвейера в обратном порядке: tun2socks → движок → protectServer → TUN.
      * Идемпотентен: повторный вызов из другого потока просто выходит.
      *
      * @param restoreIdle false, если состояние уже [ServiceState.Error] — не затираем текст.
@@ -331,8 +320,7 @@ class TunnelVpnService : VpnService() {
             runCatching { TunSocksBridge.stop() }
             runCatching { engine.stop() }
             // Сервер protect() гасим ПОСЛЕ движка (ядро может ещё слать запросы на
-            // -P сокет при завершении) и ДО закрытия TUN: VpnService.protect()
-            // после закрытия интерфейса уже не работает.
+            // -P сокет при завершении) и ДО закрытия TUN.
             runCatching { protectServer?.shutdown() }
             protectServer = null
             runCatching { tunInterface?.close() }
@@ -340,10 +328,12 @@ class TunnelVpnService : VpnService() {
         } catch (t: Throwable) {
             Log.e(TAG, "cleanup failed", t)
         } finally {
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            if (restoreIdle) {
-                ServiceManager.updateState(ServiceState.Idle)
+            if (!desiredRunning) {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                if (restoreIdle) {
+                    ServiceManager.updateState(ServiceState.Idle)
+                }
             }
             cleaning.set(false)
             Log.i(TAG, "Tunnel stopped")
@@ -353,17 +343,14 @@ class TunnelVpnService : VpnService() {
     /**
      * Смотритель за живостью конвейера.
      *
-     * Первая проверка — через 1 с: исторически поток туннеля умирал сразу после
-     * старта, и UI показывал «работает» без интернета. Дальше — раз в
-     * [HEALTH_INTERVAL_SEC]: на агрессивных оболочках (Samsung Low Power Mode,
-     * «оптимизация работы в фоновом режиме») половину туннеля могут убить
-     * через полчаса, и пользователь должен увидеть причину, а не молчаливый ноль.
+     * Первая проверка — через 1 с после старта, дальше — раз в [HEALTH_INTERVAL_SEC] с.
      */
     private fun armWatchdog() {
         watchdogTask?.cancel(false)
         watchdogTask = watchdog.scheduleWithFixedDelay({
-            // Идёт сборка конвейера — не вмешиваемся.
-            if (startingTunnel || stopping.get() || tunInterface == null) return@scheduleWithFixedDelay
+            if (startingTunnel || stopping.get() || !desiredRunning || tunInterface == null) {
+                return@scheduleWithFixedDelay
+            }
             try {
                 when {
                     !TunSocksBridge.isRunning() ->
@@ -379,17 +366,17 @@ class TunnelVpnService : VpnService() {
             } catch (t: Throwable) {
                 Log.w(TAG, "watchdog check failed", t)
             }
-        }, FIRST_CHECK_DELAY_MS, HEALTH_INTERVAL_SEC, TimeUnit.SECONDS)
+        }, 1L, HEALTH_INTERVAL_SEC, TimeUnit.SECONDS)
     }
 
     /**
      * Реакция watchdog'а. Разборку выполняем на [worker] и ПОВТОРНО проверяем
      * состояние уже там: пока задача ждала своей очереди, конвейер мог штатно
-     * остановиться или, наоборот, подняться — иначе watchdog убил бы здоровый туннель.
+     * остановиться или перезапуститься.
      */
     private fun abortFromWatchdog(message: String) {
         worker.execute {
-            if (!startingTunnel && !stopping.get() && tunInterface != null) {
+            if (!startingTunnel && !stopping.get() && desiredRunning && tunInterface != null) {
                 abort(message)
             }
         }
@@ -398,19 +385,20 @@ class TunnelVpnService : VpnService() {
     /** Разрешение VPN отозвано пользователем из системных настроек. */
     override fun onRevoke() {
         Log.w(TAG, "onRevoke: VPN permission revoked")
+        desiredRunning = false
+        stopping.set(true)
         worker.execute { stopTunnel() }
-        // Реализация по умолчанию делает stopSelf(); вызываем явно, чтобы система
-        // считала сервис корректно остановленным, а не «убитым».
         super.onRevoke()
     }
 
     override fun onDestroy() {
-        // Если сервис убит системой без штатной остановки — прибираемся, но НЕ
-        // здесь (разборка блокирующая → ANR в главном потоке). Задачу кладём в
-        // тот же worker и закрываем его: поставленное выполнится, новое — нет.
+        // Если сервис убит системой без штатной остановки — прибираемся в worker
+        // (блокирующие вызовы в главном потоке приведут к ANR).
+        desiredRunning = false
+        stopping.set(true)
         watchdogTask?.cancel(false)
         watchdog.shutdownNow()
-        if (tunInterface != null) {
+        if (tunInterface != null || protectServer != null) {
             Log.w(TAG, "onDestroy with active tunnel — emergency cleanup in worker")
             worker.execute { cleanup(restoreIdle = true) }
         }
@@ -425,14 +413,10 @@ class TunnelVpnService : VpnService() {
         /** StringArrayListExtra: аргументы движка от пресета. */
         const val EXTRA_ENGINE_ARGS = "com.dpibreak.ENGINE_ARGS"
 
-        /** Имя Unix-сокета сервера protect() в cacheDir (путь < 92 символов — лимит sun_path). */
+        /** Имя Unix-сокета сервера protect() в cacheDir (путь < 108 байт — лимит sun_path). */
         private const val PROTECT_SOCKET_NAME = "pr.sock"
 
-
-        /** Первая проверка живости — через секунду после старта. */
-        private const val FIRST_CHECK_DELAY_MS = 1000L
-
-        /** Интервал дальнейшего контроля конвейера. */
+        /** Интервал контроля живости конвейера (в секундах). */
         private const val HEALTH_INTERVAL_SEC = 30L
 
         /** PendingIntent: открыть приложение по нажатию на уведомление. */
@@ -446,127 +430,102 @@ class TunnelVpnService : VpnService() {
 }
 
 /**
- * Сервер protect() для нативного ядра byedpi (аналогprotect-сервисов из
- * ethereal/Intra/ByeByeDPI-форков).
+ * Сервер protect() для нативного ядра byedpi.
  *
- * ПРОБЛЕМА, КОТОРУЮ ОН РЕШАЕТ: когда VPN-туннель активен, ВЕСЬ трафик нашего
- * процесса (включая соединения byedpi в интернет) идёт через TUN → tun2socks →
- * снова byedpi → снова в TUN. Это петля: приложение «включено», но интернета
- * нет. Единственный способ разорвать её — пометить исходящие сокеты движка как
- * защищённые ([VpnService.protect]), чтобы обходной интерфейс их не перехватывал.
+ * Когда VPN-туннель активен, трафик нашего процесса шёл бы обратно в TUN (петля).
+ * При запуске с `-P <path>` ядро byedpi перед каждым исходящим соединением
+ * подключается к нашему Unix-сокету в файловой системе (`cacheDir/pr.sock`) и
+ * одним сообщением `sendmsg()` присылает 1 байт-маркер + fd сокета в SCM_RIGHTS
+ * (см. `byedpi/extend.c:protect`). Сервер вызывает [VpnService.protect] и
+ * отвечает одним байтом: `1` = успех, `0` = отказ.
  *
- * МЕХАНИЗМ: ядро byedpi умеет сам просить protect для каждого нового сокета —
- * при указанном `-P <path>` оно подключается к нашему Unix-сокету и передаёт
- * fd сокетовым сообщением (SCM_RIGHTS, см. extend.c:protect()). Здесь мы
- * принимаем fd, вызываем protect() и отвечаем одним байтом: 1 = успех, 0 = отказ.
- * Отказ (закрытый туннель) приводит лишь к закрытию одного соединения — ядро
- * корректно обрабатывает ошибку, процесс не падает.
+ * Вся работа с AF_UNIX в файловой системе и приёмом SCM_RIGHTS вынесена в C
+ * (`native-lib.c`), потому что Android `LocalServerSocket(String)` биндится в
+ * abstract namespace, а `LocalSocket.getAncillaryFileDescriptors()` теряет fd.
  *
- * ПУТЬ: сокет в cacheDir приложения (доступен тому же UID); имя короткое —
- * адрес в sun_path ограничен ~108 байтами.
+ * ВНИМАНИЕ: при переименовании класса/пакета обновить имена JNI-функций в
+ * `native-lib.c` и правило в `app/proguard-rules.pro`.
  */
-private class ProtectSocketServer(
+internal class ProtectSocketServer(
     private val vpnService: VpnService,
     private val socketPath: String,
 ) {
 
-    private val serverSocket = LocalServerSocket(socketPath)
-
-    /** Поток accept'а: daemon, чтобы зависший сервер не удерживал процесс. */
-    private val acceptThread = Thread({ acceptLoop() }, "DPIBreak-protect").apply {
-        isDaemon = true
-    }
+    private val closed = AtomicBoolean(false)
+    private val serverFd: Int
+    private val acceptThread: Thread
 
     init {
-        // Старый сокет после убийства процесса мог остаться на диске —
-        // bind() тогда падает с EADDRINUSE. Чистим заранее.
-        runCatching { File(socketPath).delete() }
-        acceptThread.start()
+        val fd = jniCreateSocket(socketPath)
+        if (fd < 0) {
+            throw IOException("Не удалось создать Unix-сокет protect: $socketPath")
+        }
+        serverFd = fd
+        acceptThread = Thread({ acceptLoop() }, "DPIBreak-protect").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun acceptLoop() {
-        while (!Thread.currentThread().isInterrupted) {
-            val client = try {
-                serverSocket.accept()
-            } catch (_: IOException) {
-                break // сервер закрыт через shutdown()
+        try {
+            while (!closed.get()) {
+                val clientFd = jniAcceptClient(serverFd)
+                if (clientFd < 0) {
+                    if (closed.get()) break
+                    continue
+                }
+                handleClient(clientFd)
             }
-            try {
-                handleClient(client)
-            } catch (t: Throwable) {
-                Log.w(TAG, "protect request failed", t)
-            } finally {
-                runCatching { client.close() }
-            }
+        } finally {
+            jniCloseFd(serverFd)
+            runCatching { File(socketPath).delete() }
         }
     }
 
-    /**
-     * Протокол byedpi (extend.c:protect()): клиент шлёт ОДИН сообщение
-     * sendmsg(), где одновременно идут 1 байт-маркер ('1') и fd сокета в
-     * ancillary-данных SCM_RIGHTS, затем ждёт 1 байт ответа (1 = успех).
-     *
-     * Публичный Android API (LocalSocket) НЕ даёт принять SCM_RIGHTS:
-     * getAncillaryFileDescriptors() всегда возвращает null — внутри AOSP
-     * receiveRights() передаёт в native recvmsg нулевой iovec (0 байт), а
-     * ядро Linux丢弃 ancillary-данные, если в datagram нет ни одного байта.
-     * Поэтому приём fd реализован в нативном коде (native-lib.c): там обычный
-     * recvmsg с реальным буфером. Здесь только запрашиваем fd и вызываем
-     * VpnService.protect().
-     */
-    private fun handleClient(client: LocalSocket) {
-        val input = client.inputStream
-        val output = client.outputStream
-
-        // Байт-маркер ('1') — читаем его ИМЕННО здесь, до nativeRecvProtectedFd:
-        // nativный recvmsg заберёт из очереди соединения только то, что придёт
-        // ПОСЛЕ этого чтения; порядок гарантирует, что мы примем ровно тот
-        // сегмент, который ждёт ответ.
-        if (input.read() == -1) return
-
-        val connFd = try {
-            nativeRecvProtectedFd(client.fileDescriptor)
-        } catch (t: Throwable) {
-            Log.e(TAG, "native recv of protected fd failed", t)
-            -1
-        }
+    private fun handleClient(clientFd: Int) {
         var ok = false
-        if (connFd >= 0) {
-            try {
-                // VpnService.protect(int) помечает сокет как защищённый (вне TUN)
-                // и НЕ забирает владение fd — закрываем сами в finally.
-                ok = vpnService.protect(connFd)
-                if (!ok) Log.w(TAG, "VpnService.protect() returned false")
-            } catch (t: Throwable) {
-                Log.e(TAG, "protect() threw", t)
-            } finally {
-                closeNativeFd(connFd)
+        try {
+            val connFd = jniRecvProtectedFd(clientFd)
+            if (connFd >= 0) {
+                try {
+                    // VpnService.protect(int) помечает сокет защищённым и НЕ забирает
+                    // владение дескриптором — полученную из SCM_RIGHTS копию закрываем сами.
+                    ok = vpnService.protect(connFd)
+                    if (!ok) {
+                        Log.w(TAG, "VpnService.protect() returned false")
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "protect() threw", t)
+                } finally {
+                    jniCloseFd(connFd)
+                }
+            } else {
+                Log.w(TAG, "no fd received on protect socket")
             }
-        } else {
-            Log.w(TAG, "no fd received on protect socket (proto mismatch?)")
+        } finally {
+            jniReplyAndClose(clientFd, ok)
         }
-        // Ядро считает соединение живым только при ответе 1; на 0 оно закрывает сокет.
-        output.write(if (ok) 1 else 0)
-        output.flush()
     }
 
-    /** Идемпотентная остановка: закрывает listening-сокет (accept бросит IOException). */
+    /** Идемпотентная остановка: будит accept() через shutdown() и ждёт поток. */
     fun shutdown() {
-        runCatching { serverSocket.close() }
+        if (!closed.compareAndSet(false, true)) return
+        jniShutdownSocket(serverFd)
         runCatching { File(socketPath).delete() }
+        if (acceptThread !== Thread.currentThread()) {
+            runCatching { acceptThread.join(1_000) }
+        }
     }
+
+    private external fun jniCreateSocket(path: String): Int
+    private external fun jniAcceptClient(serverFd: Int): Int
+    private external fun jniRecvProtectedFd(clientFd: Int): Int
+    private external fun jniReplyAndClose(clientFd: Int, ok: Boolean)
+    private external fun jniShutdownSocket(fd: Int)
+    private external fun jniCloseFd(fd: Int)
 
     companion object {
-        /**
-         * Приём fd'а из SCM_RIGHTS на данном Unix-соединении (см. native-lib.c).
-         * Возвращает системный fd (владелец — вызывающий, закрыть [closeNativeFd])
-         * или -1, если сообщение не содержало дескриптор.
-         */
-        private external fun nativeRecvProtectedFd(fd: java.io.FileDescriptor): Int
-
-        /** Закрывает fd, полученный из [nativeRecvProtectedFd]. */
-        private external fun closeNativeFd(fd: Int)
-
         init {
             System.loadLibrary("dpibreak")
         }

@@ -42,10 +42,13 @@
 #endif
 
 
-int server_fd;
+volatile int server_fd = -1;
 
 static void on_cancel(int sig) {
-    shutdown(server_fd, SHUT_RDWR);
+    int fd = server_fd;
+    if (fd >= 0) {
+        shutdown(fd, SHUT_RDWR);
+    }
 }
 
 void dump_all_cache(void);
@@ -130,9 +133,7 @@ static int resolve(const char *chost, int len,
     struct addrinfo hints = {0}, *res = 0;
     
     hints.ai_socktype = type;
-    hints.ai_flags = AI_ADDRCONFIG;
-    if (!params.resolve)
-        hints.ai_flags |= AI_NUMERICHOST;
+    hints.ai_flags = params.resolve ? 0 : AI_NUMERICHOST;
     // На Android VpnService: AI_ADDRCONFIG опирается на «постоянные» адреса
     // интерфейсов, а адрес TUN (/128) таковым не считается — getaddrinfo с
     // этим флагом на чистом IPv6-хосте (Twitch/pusher/QUIC) возвращает EAI_ADDRFAMILY,
@@ -388,25 +389,20 @@ static int tls_get_addr(
     
 static int remote_sock(union sockaddr_u *dst, int type)
 {
-    // Семейство исходящего сокета выбираем по адресу НАЗНАЧЕНИЯ, а не по
-    // params.baddr. Дефолт baddr — AF_INET6 (::), и прежний код принудительно
-    // маппил любой IPv4-мишень в IPv4-mapped (::ffff:a.b.c.d). На Android это
-    // ломало весь трафик: connect() к mapped-адресу идёт по IPv6-маршруту
-    // ::/0 внутри TUN (hev-socks5-tunnel его не проксирует) либо ENETUNREACH,
-    // если v6-маршрута нет. Именно так «умирали» Twitch/стримы после включения
-    // обхода. При -X (или без v6-стека) baddr становится AF_INET — тогда, как
-    // в эталонном ByeDPI, ipv4-хосты резолвятся через v6-nat64 префикс
-    // (см. resolve()), а остальные мишени отклоняются явно.
-    const bool force_v4 = (params.baddr.sa.sa_family != AF_INET6);
-    if (force_v4) {
-        if (dst->sa.sa_family == AF_INET) {
-            map_fix(dst, 6);   // -> ::ffff:a.b.c.d (для nat64-резолювера)
-        } else if (!IN6_IS_ADDR_V4MAPPED(&dst->in6.sin6_addr)) {
-            LOG(LOG_E, "different addresses family\n");
-            return -1;
+    // Семейство исходящего сокета выбираем по адресу НАЗНАЧЕНИЯ:
+    //  - для IPv4-целей открываем чистый AF_INET-сокет (без v4-mapped IPv6);
+    //  - для IPv6-целей открываем AF_INET6-сокет (если IPv6 не отключён через -X).
+    if (!params.ipv6) {
+        if (dst->sa.sa_family == AF_INET6) {
+            if (IN6_IS_ADDR_V4MAPPED(&dst->in6.sin6_addr)) {
+                map_fix(dst, 0);   // ::ffff:a.b.c.d -> чистый AF_INET
+            } else {
+                LOG(LOG_E, "IPv6 disabled, dropping v6 target\n");
+                return -1;
+            }
         }
     } else {
-        map_fix(dst, 0);       // mapped-v6 -> чистый AF_INET, остальное как есть
+        map_fix(dst, 0);           // mapped-v6 -> чистый AF_INET, остальное как есть
     }
     int sfd = nb_socket(dst->sa.sa_family, type);
     if (sfd < 0) {
@@ -535,26 +531,23 @@ static int udp_associate(struct poolhd *pool,
         close(ufd);
         return -1;
     }
+    pair->addr.sa.sa_family = addr.sa.sa_family;
+    pair->addr.in.sin_port = 0;
     //
     socklen_t sz = sizeof(addr);
     
     if (getsockname(val->fd, &addr.sa, &sz)) {
         uniperror("getsockname");
+        del_event(pool, pair);
         return -1;
     }
     addr.in.sin_port = 0;
     
+    // cfd — локальный UDP-сокет на 127.0.0.1 для обмена с tun2socks (не в интернет;
+    // исходящий в интернет сокет ufd уже защищён через remote_sock -> socket_mod).
     int cfd = nb_socket(addr.sa.sa_family, SOCK_DGRAM);
     if (cfd < 0) {
         uniperror("socket");
-        del_event(pool, pair);
-        return -1;
-    }
-    // Анти-петля: cfd — исходящий UDP-сокет движка. Без protect() его трафик
-    // снова попадёт в TUN → tun2socks → byedpi (петля). bind ниже идёт к
-    // порту 0 (lazy binding), это безопасно.
-    if (socket_mod(cfd) < 0) {
-        close(cfd);
         del_event(pool, pair);
         return -1;
     }
@@ -829,11 +822,22 @@ int on_udp_tunnel(struct poolhd *pool, struct eval *val, int et)
                 return -1;
             }
             if (!pair->addr.in.sin_port) {
-                if (params.baddr.sa.sa_family == AF_INET6) {
-                    map_fix(&addr, 6);
-                }
-                if (params.baddr.sa.sa_family != addr.sa.sa_family) {
+                map_fix(&addr, 0);
+                if (!params.ipv6 && addr.sa.sa_family == AF_INET6) {
                     return -1;
+                }
+                // В UDP ASSOCIATE клиент (tun2socks) передаёт 0.0.0.0:0 (AF_INET),
+                // поэтому ufd изначально AF_INET. Если реальная цель первой
+                // датаграммы оказалась IPv6 — переоткрываем защищённый AF_INET6-сокет.
+                if (pair->addr.sa.sa_family != addr.sa.sa_family) {
+                    int new_ufd = remote_sock(&addr, SOCK_DGRAM);
+                    if (new_ufd < 0) {
+                        return -1;
+                    }
+                    if (replace_event_fd(pool, pair, new_ufd, POLLIN) < 0) {
+                        close(new_ufd);
+                        return -1;
+                    }
                 }
                 INIT_ADDR_STR((addr));
                 LOG(LOG_S, "udp addr: fd=%d, addr=%s:%d\n", 
@@ -1052,21 +1056,23 @@ int on_ignore(struct poolhd *pool, struct eval *val, int etype)
 
 int start_event_loop(int srvfd)
 {
-    server_fd = srvfd;
-    
     struct poolhd *pool = init_pool(params.max_open * 2 + 1);
     if (!pool) {
         close(srvfd);
+        server_fd = -1;
         return -1;
     }
     if (!add_event(pool, &on_accept, srvfd, POLLIN)) {
         destroy_pool(pool);
         close(srvfd);
+        server_fd = -1;
         return -1;
     }
+    server_fd = srvfd;
     loop_event(pool);
     
     LOG(LOG_S, "exit\n");
+    server_fd = -1;
     destroy_pool(pool);
     return 0;
 }
