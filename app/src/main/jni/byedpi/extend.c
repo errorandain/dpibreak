@@ -183,13 +183,24 @@ static int on_socks_conn(struct poolhd *pool, struct eval *val, int t)
 
 int socket_mod(int fd)
 {
+    #ifdef __linux__
+    // ВАЖНО (анти-петля под Android VpnService): protect() вызываем ПЕРВЫМ —
+    // до любых setsockopt и, главное, до bind()/connect() у сокета. На Android
+    // защита, применённая после bind(), сбрасывается: исходящий трафик движка
+    // снова перехватывается TUN-интерфейсом и возникает петля
+    // («VPN включён, интернета нет»). Вызов здесь покрывает все места создания
+    // сокетов ядром (remote_sock, desync/fake-сокеты).
+    if (params.protect_path) {
+        if (protect(fd, params.protect_path) < 0) {
+            uniperror("protect");
+            return -1;
+        }
+    }
+    #endif
     if (params.custom_ttl) {
         if (setttl(fd, params.def_ttl) < 0) {
             return -1;
         }
-    }
-    if (params.protect_path) {
-        return protect(fd, params.protect_path);
     }
     return 0;
 }

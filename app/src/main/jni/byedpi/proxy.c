@@ -35,6 +35,9 @@
     #ifdef __linux__
         /* For SO_ORIGINAL_DST only (which is 0x50) */
         #include "linux/netfilter_ipv4.h"
+        /* Для проверки наличия IPv6-маршрута по умолчанию (v6_route_ok) */
+        #include <linux/rtnetlink.h>
+        #include <stdbool.h>
         #ifndef IP6T_SO_ORIGINAL_DST
         #define IP6T_SO_ORIGINAL_DST SO_ORIGINAL_DST
         #endif
@@ -125,14 +128,44 @@ static inline int nb_socket(int domain, int type)
 
 
 static int resolve(const char *chost, int len, 
+        union sockaddr_u *addr, int type);
+
+// Проверка наличия IPv6-маршрута ВНЕ туннеля (реализация — ниже, перед
+// remote_sock). Объявлена заранее, чтобы resolve() мог на неё опираться.
+static bool v6_route_ok(void);
+
+// Кэш результата v6_route_ok(): зонд дешёвый, но вызывается на каждый резолв
+// с AAAA-результатом, поэтому вычисляем один раз за процесс.
+static int v6_available = -1; // -1 = unknown, 0 = no, 1 = yes
+
+static inline bool ipv6_can_reach(void)
+{
+    if (v6_available < 0) {
+        v6_available = v6_route_ok();
+    }
+    return v6_available;
+}
+
+
+static int resolve(const char *chost, int len, 
         union sockaddr_u *addr, int type) 
 {
     struct addrinfo hints = {0}, *res = 0;
     
     hints.ai_socktype = type;
-    hints.ai_flags = AI_ADDRCONFIG;
+    // ВАЖНО (Android + VpnService): флаг AI_ADDRCONFIG НЕ ставим (в отличие от
+    // эталонного десктопного ByeDPI). Он фильтрует результаты getaddrinfo по
+    // «постоянным» (permanent) адресам интерфейсов; на Android у TUN адрес /32
+    // или /128 динамический, и с этим флагом резолв чистых IPv6-хостов
+    // (Twitch pusher/mediaserver, QUIC) возвращает EAI_ADDRFAMILY — соединение
+    // отваливается ещё до создания сокета.
     if (!params.resolve)
         hints.ai_flags |= AI_NUMERICHOST;
+    // На Android VpnService: AI_ADDRCONFIG опирается на «постоянные» адреса
+    // интерфейсов, а адрес TUN (/128) таковым не считается — getaddrinfo с
+    // этим флагом на чистом IPv6-хосте (Twitch/pusher/QUIC) возвращает EAI_ADDRFAMILY,
+    // и соединение отваливается ещё до создания сокета. Флаг убираем: у туннеля
+    // есть и v4, и v6 маршруты, резолвить нужно оба семейства.
     hints.ai_family = params.ipv6 ? AF_UNSPEC : AF_INET;
     
     char host[len + 1];
@@ -143,6 +176,23 @@ static int resolve(const char *chost, int len,
     
     if (getaddrinfo(host, 0, &hints, &res) || !res) {
         return -1;
+    }
+    // Если getaddrinfo вернул IPv6-адрес, а физической v6-связности вне
+    // туннеля нет (типично для мобильных сетей), connect() к AAAA даст
+    // ENETUNREACH и соединение умрёт (симптом: «интернет не работает»,
+    // стримы/Twitch встают). Подменяем на A-запись того же имени.
+    if (res->ai_family == AF_INET6 && !ipv6_can_reach()) {
+        freeaddrinfo(res);
+        res = 0;
+        struct addrinfo v4hints = {0};
+        v4hints.ai_socktype = type;
+        v4hints.ai_family = AF_INET;
+        if (!params.resolve)
+            v4hints.ai_flags |= AI_NUMERICHOST;
+        if (getaddrinfo(host, 0, &v4hints, &res) || !res) {
+            return -1;
+        }
+        LOG(LOG_S, "resolve: %s -> forced IPv4 (no v6 route)\n", host);
     }
     memcpy(addr, res->ai_addr, SA_SIZE(res->ai_addr));
     freeaddrinfo(res);
@@ -381,22 +431,73 @@ static int tls_get_addr(
 }
 
     
+// Доступна ли процессу маршрутизация IPv6 ВНЕ туннеля. Сокеты движка защищены
+// VpnService.protect() и ходят через физический интерфейс; на многих мобильных
+// сетях связность только IPv4, и тогда connect() к AAAA-мишени гарантированно
+// даёт ENETUNREACH/EAFNOSUPPORT. getaddrinfo без AI_ADDRCONFIG (см. resolve())
+// мог вернуть сначала именно AAAA — так ломались Twitch/стримы после включения
+// обхода. Проверка дешёвая и не требует привилегий: создаём защищённый
+// неблокирующий UDP-сокет AF_INET6 и пробуем connect() на адрес из RFC 6666
+// (IPv6 DISCARD-ONLY префикс, зарезервирован под «мусор», реально ничего не
+// получает). Если ядро знает v6-маршрут — connect вернёт 0 или EINPROGRESS;
+// если стека/маршрута нет — сразу ошибка. bind/connect у UDP-сокетов вне
+// туннеля безопасны: трафика мы не отправляем.
+static bool v6_route_ok(void)
+{
+    const int fd = socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    // Помечаем сокет защищённым, чтобы сам зонд не ушёл в TUN (петля/ложный
+    // успех через туннельный маршрут ::/0).
+    socket_mod(fd);
+    struct sockaddr_in6 sa = {0};
+    sa.sin6_family = AF_INET6;
+    sa.sin6_port = htons(9); // discard
+    inet_pton(AF_INET6, "100::", &sa.sin6_addr); // RFC 6666 discard-only
+    const int err = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+    const int e = get_e();
+    close(fd);
+    return err == 0 || e == EINPROGRESS || e == EAGAIN || e == EALREADY;
+}
+
+
+// prefer_v4() интегрирован непосредственно в resolve() (см. выше): при AAAA-
+// результате и отсутствии v6-маршрута берётся A-запись того же имени. Отдельная
+// функция не нужна — все точки резолва (SOCKS5 ATYP=DOMAIN, HTTP CONNECT,
+// raw-TLS SNI, Shadowsocks) проходят через resolve().
+
+
 static int remote_sock(union sockaddr_u *dst, int type)
 {
-    if (params.baddr.sa.sa_family == AF_INET6) {
-        map_fix(dst, 6);
+    // Семейство исходящего сокета выбираем по адресу НАЗНАЧЕНИЯ, а не по
+    // params.baddr. Дефолт baddr — AF_INET6 (::), и прежний код принудительно
+    // маппил любой IPv4-мишень в IPv4-mapped (::ffff:a.b.c.d). На Android это
+    // ломало весь трафик: connect() к mapped-адресу идёт по IPv6-маршруту
+    // ::/0 внутри TUN (hev-socks5-tunnel его не проксирует) либо ENETUNREACH,
+    // если v6-маршрута нет. Именно так «умирали» Twitch/стримы после включения
+    // обхода. При -X (или без v6-стека) baddr становится AF_INET — тогда, как
+    // в эталонном ByeDPI, ipv4-хосты резолвятся через v6-nat64 префикс
+    // (см. resolve()), а остальные мишени отклоняются явно.
+    const bool force_v4 = (params.baddr.sa.sa_family != AF_INET6);
+    if (force_v4) {
+        if (dst->sa.sa_family == AF_INET) {
+            map_fix(dst, 6);   // -> ::ffff:a.b.c.d (для nat64-резолювера)
+        } else if (!IN6_IS_ADDR_V4MAPPED(&dst->in6.sin6_addr)) {
+            LOG(LOG_E, "different addresses family\n");
+            return -1;
+        }
     } else {
-        map_fix(dst, 0);
-    }
-    if (dst->sa.sa_family != params.baddr.sa.sa_family) {
-        LOG(LOG_E, "different addresses family\n");
-        return -1;
+        map_fix(dst, 0);       // mapped-v6 -> чистый AF_INET, остальное как есть
     }
     int sfd = nb_socket(dst->sa.sa_family, type);
     if (sfd < 0) {
         uniperror("socket");  
         return -1;
     }
+    // Анти-петля: socket_mod() теперь защищает сокет через protect() ПЕРВЫМ
+    // делом — до bind() и connect() ниже (см. extend.c). Порядок критичен для
+    // Android VpnService: protect после bind не удерживается.
     if (socket_mod(sfd) < 0) {
         close(sfd);
         return -1;
@@ -409,6 +510,17 @@ static int remote_sock(union sockaddr_u *dst, int type)
             close(sfd);
             return -1;
         }
+    }
+    // bind() локального адреса (params.baddr) обязателен только в режиме
+    // альтернативного маршрута (-I/-B). В обычном режиме baddr — wildcard
+    // (:: или 0.0.0.0) с портом 0, и bind такого адреса на Android внутри
+    // VpnService нестабилен: bind('::') может вернуть EINVAL/EPERM, а сам
+    // факт bind прерывает «lazy binding» — connect() больше не выбирает
+    // source-адрес автоматически по таблице маршрутизации. Это ломает ВСЕ
+    // исходящие соединения движка (стримы/Twitch «перестают работать»).
+    // Поэтому при нулевом порту baddr bind пропускаем (как в эталоне).
+    if (!params.baddr.in.sin_port) {
+        return sfd;
     }
     if (bind(sfd, (struct sockaddr *)&params.baddr, 
             SA_SIZE(&params.baddr)) < 0) {
@@ -517,6 +629,14 @@ static int udp_associate(struct poolhd *pool,
     int cfd = nb_socket(addr.sa.sa_family, SOCK_DGRAM);
     if (cfd < 0) {
         uniperror("socket");
+        del_event(pool, pair);
+        return -1;
+    }
+    // Анти-петля: cfd — исходящий UDP-сокет движка. Без protect() его трафик
+    // снова попадёт в TUN → tun2socks → byedpi (петля). bind ниже идёт к
+    // порту 0 (lazy binding), это безопасно.
+    if (socket_mod(cfd) < 0) {
+        close(cfd);
         del_event(pool, pair);
         return -1;
     }
