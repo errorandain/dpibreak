@@ -4,30 +4,34 @@ package com.dpibreak.domain
  * Универсальная стратегия обхода DPI.
  * Объединяет лучшие методы: десинхронизацию, фейковые пакеты и авто-подбор.
  * Работает для YouTube, Telegram, Discord, Instagram и большинства заблокированных ресурсов.
+ * 
+ * Ключевые параметры для YouTube:
+ * - --fake=mss: Эмулирует неверный MSS (Maximum Segment Size) — критично для YouTube!
+ * - --disorder=5: Меняет порядок 5 пакетов (агрессивнее обход)
+ * - --oob=0x00: Добавляет OOB-данные в фейковые пакеты
+ * - --ttl=8: TTL фейковых пакетов (должен быть меньше реального TTL до сервера)
  */
 data class UniversalStrategy(
     val name: String = "Universal Bypass",
     
     // Основные аргументы ядра byedpi
-    // --auto=torst: Автоматически выбирает метод (TLS Record Splitting или Fake Request) в зависимости от типа блокировки
-    // --fake -1: Отправляет фейковый TLS пакет перед реальным (сбрасывает анализ DPI)
-    // --tlsrec 1+s: Разбивает первый пакет TLS на части (1 байт + остальное), ломая сигнатуру SNI
-    // --disorder 1: Меняет порядок пакетов (если поддерживается ядром)
     val arguments: List<String> = listOf(
-        "--auto=torst",
-        "--fake=-1",
-        "--tlsrec=1+s",
-        "--disorder=1",
-        "--dnsover=https://dns.cloudflare.com/dns-query" // Встроенный DoH для надежности
+        "--auto=torst",           // Авто-режим: TLS Record Splitting или Fake Request
+        "--tlsrec=1+s",           // Разбивает первый пакет TLS (1 байт + остальное)
+        "--disorder=5",           // Меняет порядок 5 пакетов (агрессивнее для YouTube)
+        "--fake=mss",             // КРИТИЧНО: эмуляция неверного MSS (лучше чем --fake=1)
+        "--oob=0x00",             // Добавляет OOB-данные в фейковые пакеты
+        "--ttl=8",                // TTL фейковых пакетов (исчезают до достижения сервера)
+        "--dnsover=https://dns.google/dns-query"  // Google DNS для googlevideo.com
     ),
 
-    // Блокировка QUIC (UDP 443) принудительно переводит трафик в TCP, где обход работает стабильнее
+    // Блокировка QUIC (UDP 443) принудительно переводит трафик в TCP
     val blockQuic: Boolean = true,
 
-    // Hostlist пуст, так как стратегия универсальна и применяется ко всему трафику
+    // Hostlist пуст, так как стратегия универсальна
     val hostlist: List<String> = emptyList(),
 
-    // Исключения (банки, госуслуги) остаются, чтобы не ломать локальные приложения
+    // Исключения (банки, госуслуги)
     val excludedApps: List<String> = listOf(
         "ru.sberbankmobile",
         "ru.vtb.mobileapp",
