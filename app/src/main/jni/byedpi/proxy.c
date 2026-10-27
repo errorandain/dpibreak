@@ -1,10 +1,12 @@
 #include "proxy.h"
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <assert.h>
 
 #include "params.h"
@@ -35,9 +37,6 @@
     #ifdef __linux__
         /* For SO_ORIGINAL_DST only (which is 0x50) */
         #include "linux/netfilter_ipv4.h"
-        /* Для проверки наличия IPv6-маршрута по умолчанию (v6_route_ok) */
-        #include <linux/rtnetlink.h>
-        #include <stdbool.h>
         #ifndef IP6T_SO_ORIGINAL_DST
         #define IP6T_SO_ORIGINAL_DST SO_ORIGINAL_DST
         #endif
@@ -137,16 +136,20 @@ static int resolve(const char *chost, int len,
 // remote_sock). Объявлена заранее, чтобы resolve() мог на неё опираться.
 static bool v6_route_ok(void);
 
-// Кэш результата v6_route_ok(): зонд дешёвый, но вызывается на каждый резолв
-// с AAAA-результатом, поэтому вычисляем один раз за процесс.
+// Кэш результата v6_route_ok() с коротким TTL (5 сек), чтобы при переключении
+// телефона между Wi-Fi (есть IPv6) и мобильной сетью (только IPv4) без
+// перезапуска VPN движок автоматически перепроверял наличие маршрута.
 static int v6_available = -1; // -1 = unknown, 0 = no, 1 = yes
+static time_t v6_checked_at = 0;
 
 static inline bool ipv6_can_reach(void)
 {
-    if (v6_available < 0) {
-        v6_available = v6_route_ok();
+    time_t now = time(0);
+    if (v6_available < 0 || now < v6_checked_at || (now - v6_checked_at) >= 5) {
+        v6_available = v6_route_ok() ? 1 : 0;
+        v6_checked_at = now;
     }
-    return v6_available;
+    return v6_available != 0;
 }
 
 
@@ -174,24 +177,36 @@ static int resolve(const char *chost, int len,
     if (getaddrinfo(host, 0, &hints, &res) || !res) {
         return -1;
     }
-    // Если getaddrinfo вернул IPv6-адрес, а физической v6-связности вне
-    // туннеля нет (типично для мобильных сетей), connect() к AAAA даст
-    // ENETUNREACH и соединение умрёт (симптом: «интернет не работает»,
-    // стримы/Twitch встают). Подменяем на A-запись того же имени.
-    if (res->ai_family == AF_INET6 && !ipv6_can_reach()) {
-        freeaddrinfo(res);
-        res = 0;
-        struct addrinfo v4hints = {0};
-        v4hints.ai_socktype = type;
-        v4hints.ai_family = AF_INET;
-        if (!params.resolve)
-            v4hints.ai_flags |= AI_NUMERICHOST;
-        if (getaddrinfo(host, 0, &v4hints, &res) || !res) {
-            return -1;
+    // Если getaddrinfo вернул глобальный IPv6-адрес, а физической v6-связности
+    // вне туннеля нет (типично для мобильных сетей), ищем IPv4-запись сначала
+    // в уже полученном списке res, а при её отсутствии — отдельным запросом AF_INET.
+    const struct addrinfo *chosen = res;
+    struct addrinfo *v4res = 0;
+    if (chosen->ai_family == AF_INET6 &&
+            !IN6_IS_ADDR_LOOPBACK(&((struct sockaddr_in6 *)chosen->ai_addr)->sin6_addr) &&
+            !ipv6_can_reach()) {
+        for (const struct addrinfo *p = res->ai_next; p; p = p->ai_next) {
+            if (p->ai_family == AF_INET) {
+                chosen = p;
+                break;
+            }
         }
-        LOG(LOG_S, "resolve: %s -> forced IPv4 (no v6 route)\n", host);
+        if (chosen->ai_family == AF_INET6 && params.resolve) {
+            struct addrinfo v4hints = {0};
+            v4hints.ai_socktype = type;
+            v4hints.ai_family = AF_INET;
+            if (!getaddrinfo(host, 0, &v4hints, &v4res) && v4res) {
+                chosen = v4res;
+            }
+        }
+        if (chosen->ai_family == AF_INET) {
+            LOG(LOG_S, "resolve: %s -> forced IPv4 (no v6 route)\n", host);
+        }
     }
-    memcpy(addr, res->ai_addr, SA_SIZE(res->ai_addr));
+    memcpy(addr, chosen->ai_addr, SA_SIZE(chosen->ai_addr));
+    if (v4res) {
+        freeaddrinfo(v4res);
+    }
     freeaddrinfo(res);
     
     return 0;
@@ -441,7 +456,7 @@ static int tls_get_addr(
 // туннеля безопасны: трафика мы не отправляем.
 static bool v6_route_ok(void)
 {
-    const int fd = socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    const int fd = nb_socket(AF_INET6, SOCK_DGRAM);
     if (fd < 0) {
         return 0;
     }
@@ -1190,6 +1205,7 @@ int listen_socket(const union sockaddr_u *srv)
 int run(const union sockaddr_u *srv)
 {
     v6_available = -1;
+    v6_checked_at = 0;
     #ifdef SIGPIPE
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
         uniperror("signal SIGPIPE!");
