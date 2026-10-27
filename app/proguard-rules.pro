@@ -12,7 +12,13 @@
     native <methods>;
 }
 
-# 2) Туннель: REGISTER NATIVES (не конвенция имён!) — JNI_OnLoad в vendored-коде
+# 2) Сервер protect(): нативные методы связываются по конвенции JNI
+#    Java_com_dpibreak_core_vpn_ProtectSocketServer_jniCreateSocket и т.д.
+-keepclasseswithmembernames,includedescriptorclasses class com.dpibreak.core.vpn.ProtectSocketServer {
+    native <methods>;
+}
+
+# 3) Туннель: REGISTER NATIVES (не конвенция имён!) — JNI_OnLoad в vendored-коде
 #    ищет класс по имени, зашитому в app/src/main/jni/Application.mk:
 #        -DPKGNAME=com/dpibreak/core/tunnel -DCLSNAME=TunSocksBridge
 #    FindClass не найдёт класс после минификации -> JNI_ERR -> библиотека не
@@ -24,9 +30,9 @@
     native <methods>;
 }
 
-# 3) На случай, если JNI-методы появятся в других классах core — не давать R8
-#    удалять «невидимые из Java» нативные методы как неиспользуемые.
--keepclassmembers class com.dpibreak.** {
+# 4) На случай, если JNI-методы появятся в других классах — сохраняем и методы,
+#    и имя самого класса (иначе конвенция Java_<pkg>_<Class>_<method> сломается).
+-keepclasseswithmembernames,includedescriptorclasses class com.dpibreak.** {
     native <methods>;
 }
 

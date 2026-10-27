@@ -137,6 +137,8 @@ struct eval *next_event(struct poolhd *pool, int *offs, int *type, int ms);
 
 int mod_etype(struct poolhd *pool, struct eval *val, int type);
 
+int replace_event_fd(struct poolhd *pool, struct eval *val, int new_fd, int e);
+
 void set_timer(struct poolhd *pool, struct eval *val, long ms);
 
 void remove_timer(struct poolhd *pool, struct eval *val);

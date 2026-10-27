@@ -1,10 +1,12 @@
 #include "proxy.h"
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <assert.h>
 
 #include "params.h"
@@ -35,9 +37,6 @@
     #ifdef __linux__
         /* For SO_ORIGINAL_DST only (which is 0x50) */
         #include "linux/netfilter_ipv4.h"
-        /* Для проверки наличия IPv6-маршрута по умолчанию (v6_route_ok) */
-        #include <linux/rtnetlink.h>
-        #include <stdbool.h>
         #ifndef IP6T_SO_ORIGINAL_DST
         #define IP6T_SO_ORIGINAL_DST SO_ORIGINAL_DST
         #endif
@@ -45,10 +44,13 @@
 #endif
 
 
-int server_fd;
+volatile int server_fd = -1;
 
 static void on_cancel(int sig) {
-    shutdown(server_fd, SHUT_RDWR);
+    int fd = server_fd;
+    if (fd >= 0) {
+        shutdown(fd, SHUT_RDWR);
+    }
 }
 
 void dump_all_cache(void);
@@ -134,16 +136,20 @@ static int resolve(const char *chost, int len,
 // remote_sock). Объявлена заранее, чтобы resolve() мог на неё опираться.
 static bool v6_route_ok(void);
 
-// Кэш результата v6_route_ok(): зонд дешёвый, но вызывается на каждый резолв
-// с AAAA-результатом, поэтому вычисляем один раз за процесс.
+// Кэш результата v6_route_ok() с коротким TTL (5 сек), чтобы при переключении
+// телефона между Wi-Fi (есть IPv6) и мобильной сетью (только IPv4) без
+// перезапуска VPN движок автоматически перепроверял наличие маршрута.
 static int v6_available = -1; // -1 = unknown, 0 = no, 1 = yes
+static time_t v6_checked_at = 0;
 
 static inline bool ipv6_can_reach(void)
 {
-    if (v6_available < 0) {
-        v6_available = v6_route_ok();
+    time_t now = time(0);
+    if (v6_available < 0 || now < v6_checked_at || (now - v6_checked_at) >= 5) {
+        v6_available = v6_route_ok() ? 1 : 0;
+        v6_checked_at = now;
     }
-    return v6_available;
+    return v6_available != 0;
 }
 
 
@@ -159,13 +165,7 @@ static int resolve(const char *chost, int len,
     // или /128 динамический, и с этим флагом резолв чистых IPv6-хостов
     // (Twitch pusher/mediaserver, QUIC) возвращает EAI_ADDRFAMILY — соединение
     // отваливается ещё до создания сокета.
-    if (!params.resolve)
-        hints.ai_flags |= AI_NUMERICHOST;
-    // На Android VpnService: AI_ADDRCONFIG опирается на «постоянные» адреса
-    // интерфейсов, а адрес TUN (/128) таковым не считается — getaddrinfo с
-    // этим флагом на чистом IPv6-хосте (Twitch/pusher/QUIC) возвращает EAI_ADDRFAMILY,
-    // и соединение отваливается ещё до создания сокета. Флаг убираем: у туннеля
-    // есть и v4, и v6 маршруты, резолвить нужно оба семейства.
+    hints.ai_flags = params.resolve ? 0 : AI_NUMERICHOST;
     hints.ai_family = params.ipv6 ? AF_UNSPEC : AF_INET;
     
     char host[len + 1];
@@ -177,24 +177,36 @@ static int resolve(const char *chost, int len,
     if (getaddrinfo(host, 0, &hints, &res) || !res) {
         return -1;
     }
-    // Если getaddrinfo вернул IPv6-адрес, а физической v6-связности вне
-    // туннеля нет (типично для мобильных сетей), connect() к AAAA даст
-    // ENETUNREACH и соединение умрёт (симптом: «интернет не работает»,
-    // стримы/Twitch встают). Подменяем на A-запись того же имени.
-    if (res->ai_family == AF_INET6 && !ipv6_can_reach()) {
-        freeaddrinfo(res);
-        res = 0;
-        struct addrinfo v4hints = {0};
-        v4hints.ai_socktype = type;
-        v4hints.ai_family = AF_INET;
-        if (!params.resolve)
-            v4hints.ai_flags |= AI_NUMERICHOST;
-        if (getaddrinfo(host, 0, &v4hints, &res) || !res) {
-            return -1;
+    // Если getaddrinfo вернул глобальный IPv6-адрес, а физической v6-связности
+    // вне туннеля нет (типично для мобильных сетей), ищем IPv4-запись сначала
+    // в уже полученном списке res, а при её отсутствии — отдельным запросом AF_INET.
+    const struct addrinfo *chosen = res;
+    struct addrinfo *v4res = 0;
+    if (chosen->ai_family == AF_INET6 &&
+            !IN6_IS_ADDR_LOOPBACK(&((struct sockaddr_in6 *)chosen->ai_addr)->sin6_addr) &&
+            !ipv6_can_reach()) {
+        for (const struct addrinfo *p = res->ai_next; p; p = p->ai_next) {
+            if (p->ai_family == AF_INET) {
+                chosen = p;
+                break;
+            }
         }
-        LOG(LOG_S, "resolve: %s -> forced IPv4 (no v6 route)\n", host);
+        if (chosen->ai_family == AF_INET6 && params.resolve) {
+            struct addrinfo v4hints = {0};
+            v4hints.ai_socktype = type;
+            v4hints.ai_family = AF_INET;
+            if (!getaddrinfo(host, 0, &v4hints, &v4res) && v4res) {
+                chosen = v4res;
+            }
+        }
+        if (chosen->ai_family == AF_INET) {
+            LOG(LOG_S, "resolve: %s -> forced IPv4 (no v6 route)\n", host);
+        }
     }
-    memcpy(addr, res->ai_addr, SA_SIZE(res->ai_addr));
+    memcpy(addr, chosen->ai_addr, SA_SIZE(chosen->ai_addr));
+    if (v4res) {
+        freeaddrinfo(v4res);
+    }
     freeaddrinfo(res);
     
     return 0;
@@ -444,13 +456,16 @@ static int tls_get_addr(
 // туннеля безопасны: трафика мы не отправляем.
 static bool v6_route_ok(void)
 {
-    const int fd = socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    const int fd = nb_socket(AF_INET6, SOCK_DGRAM);
     if (fd < 0) {
         return 0;
     }
     // Помечаем сокет защищённым, чтобы сам зонд не ушёл в TUN (петля/ложный
     // успех через туннельный маршрут ::/0).
-    socket_mod(fd);
+    if (socket_mod(fd) < 0) {
+        close(fd);
+        return 0;
+    }
     struct sockaddr_in6 sa = {0};
     sa.sin6_family = AF_INET6;
     sa.sin6_port = htons(9); // discard
@@ -470,25 +485,20 @@ static bool v6_route_ok(void)
 
 static int remote_sock(union sockaddr_u *dst, int type)
 {
-    // Семейство исходящего сокета выбираем по адресу НАЗНАЧЕНИЯ, а не по
-    // params.baddr. Дефолт baddr — AF_INET6 (::), и прежний код принудительно
-    // маппил любой IPv4-мишень в IPv4-mapped (::ffff:a.b.c.d). На Android это
-    // ломало весь трафик: connect() к mapped-адресу идёт по IPv6-маршруту
-    // ::/0 внутри TUN (hev-socks5-tunnel его не проксирует) либо ENETUNREACH,
-    // если v6-маршрута нет. Именно так «умирали» Twitch/стримы после включения
-    // обхода. При -X (или без v6-стека) baddr становится AF_INET — тогда, как
-    // в эталонном ByeDPI, ipv4-хосты резолвятся через v6-nat64 префикс
-    // (см. resolve()), а остальные мишени отклоняются явно.
-    const bool force_v4 = (params.baddr.sa.sa_family != AF_INET6);
-    if (force_v4) {
-        if (dst->sa.sa_family == AF_INET) {
-            map_fix(dst, 6);   // -> ::ffff:a.b.c.d (для nat64-резолювера)
-        } else if (!IN6_IS_ADDR_V4MAPPED(&dst->in6.sin6_addr)) {
-            LOG(LOG_E, "different addresses family\n");
-            return -1;
+    // Семейство исходящего сокета выбираем по адресу НАЗНАЧЕНИЯ:
+    //  - для IPv4-целей открываем чистый AF_INET-сокет (без v4-mapped IPv6);
+    //  - для IPv6-целей открываем AF_INET6-сокет (если IPv6 не отключён через -X).
+    if (!params.ipv6) {
+        if (dst->sa.sa_family == AF_INET6) {
+            if (IN6_IS_ADDR_V4MAPPED(&dst->in6.sin6_addr)) {
+                map_fix(dst, 0);   // ::ffff:a.b.c.d -> чистый AF_INET
+            } else {
+                LOG(LOG_E, "IPv6 disabled, dropping v6 target\n");
+                return -1;
+            }
         }
     } else {
-        map_fix(dst, 0);       // mapped-v6 -> чистый AF_INET, остальное как есть
+        map_fix(dst, 0);           // mapped-v6 -> чистый AF_INET, остальное как есть
     }
     int sfd = nb_socket(dst->sa.sa_family, type);
     if (sfd < 0) {
@@ -617,26 +627,23 @@ static int udp_associate(struct poolhd *pool,
         close(ufd);
         return -1;
     }
+    pair->addr.sa.sa_family = addr.sa.sa_family;
+    pair->addr.in.sin_port = 0;
     //
     socklen_t sz = sizeof(addr);
     
     if (getsockname(val->fd, &addr.sa, &sz)) {
         uniperror("getsockname");
+        del_event(pool, pair);
         return -1;
     }
     addr.in.sin_port = 0;
     
+    // cfd — локальный UDP-сокет на 127.0.0.1 для обмена с tun2socks (не в интернет;
+    // исходящий в интернет сокет ufd уже защищён через remote_sock -> socket_mod).
     int cfd = nb_socket(addr.sa.sa_family, SOCK_DGRAM);
     if (cfd < 0) {
         uniperror("socket");
-        del_event(pool, pair);
-        return -1;
-    }
-    // Анти-петля: cfd — исходящий UDP-сокет движка. Без protect() его трафик
-    // снова попадёт в TUN → tun2socks → byedpi (петля). bind ниже идёт к
-    // порту 0 (lazy binding), это безопасно.
-    if (socket_mod(cfd) < 0) {
-        close(cfd);
         del_event(pool, pair);
         return -1;
     }
@@ -911,11 +918,22 @@ int on_udp_tunnel(struct poolhd *pool, struct eval *val, int et)
                 return -1;
             }
             if (!pair->addr.in.sin_port) {
-                if (params.baddr.sa.sa_family == AF_INET6) {
-                    map_fix(&addr, 6);
-                }
-                if (params.baddr.sa.sa_family != addr.sa.sa_family) {
+                map_fix(&addr, 0);
+                if (!params.ipv6 && addr.sa.sa_family == AF_INET6) {
                     return -1;
+                }
+                // В UDP ASSOCIATE клиент (tun2socks) передаёт 0.0.0.0:0 (AF_INET),
+                // поэтому ufd изначально AF_INET. Если реальная цель первой
+                // датаграммы оказалась IPv6 — переоткрываем защищённый AF_INET6-сокет.
+                if (pair->addr.sa.sa_family != addr.sa.sa_family) {
+                    int new_ufd = remote_sock(&addr, SOCK_DGRAM);
+                    if (new_ufd < 0) {
+                        return -1;
+                    }
+                    if (replace_event_fd(pool, pair, new_ufd, POLLIN) < 0) {
+                        close(new_ufd);
+                        return -1;
+                    }
                 }
                 INIT_ADDR_STR((addr));
                 LOG(LOG_S, "udp addr: fd=%d, addr=%s:%d\n", 
@@ -1134,21 +1152,23 @@ int on_ignore(struct poolhd *pool, struct eval *val, int etype)
 
 int start_event_loop(int srvfd)
 {
-    server_fd = srvfd;
-    
     struct poolhd *pool = init_pool(params.max_open * 2 + 1);
     if (!pool) {
         close(srvfd);
+        server_fd = -1;
         return -1;
     }
     if (!add_event(pool, &on_accept, srvfd, POLLIN)) {
         destroy_pool(pool);
         close(srvfd);
+        server_fd = -1;
         return -1;
     }
+    server_fd = srvfd;
     loop_event(pool);
     
     LOG(LOG_S, "exit\n");
+    server_fd = -1;
     destroy_pool(pool);
     return 0;
 }
@@ -1184,6 +1204,8 @@ int listen_socket(const union sockaddr_u *srv)
 
 int run(const union sockaddr_u *srv)
 {
+    v6_available = -1;
+    v6_checked_at = 0;
     #ifdef SIGPIPE
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
         uniperror("signal SIGPIPE!");

@@ -82,7 +82,7 @@ class ByedpiJniEngine : DesyncEngine {
         coreThread = thread
         thread.start()
 
-        // Ждём открытия порта SOCKS5
+        // Ждём открытия порта SOCKS5 именно нашим экземпляром byedpi
         val deadline = System.currentTimeMillis() + PORT_WAIT_MS
         while (System.currentTimeMillis() < deadline) {
             if (!thread.isAlive) {
@@ -92,16 +92,24 @@ class ByedpiJniEngine : DesyncEngine {
                 _isRunning.value = false
                 return null
             }
-            try {
-                Socket().use { s ->
-                    s.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
+            if (jniIsProxyReady()) {
+                try {
+                    Socket().use { s ->
+                        s.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
+                    }
+                    if (!thread.isAlive) {
+                        coreThread = null
+                        _isRunning.value = false
+                        return null
+                    }
+                    Log.i(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
+                    _isRunning.value = true
+                    return DEFAULT_SOCKS_PORT
+                } catch (_: IOException) {
+                    // Сокет ещё переходит в listen — подождём следующую итерацию
                 }
-                Log.i(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
-                _isRunning.value = true
-                return DEFAULT_SOCKS_PORT
-            } catch (_: IOException) {
-                Thread.sleep(100)
             }
+            Thread.sleep(50)
         }
 
         Log.e(TAG, "SOCKS5 port was not opened within ${PORT_WAIT_MS / 1000} seconds")
@@ -141,6 +149,7 @@ class ByedpiJniEngine : DesyncEngine {
     }
 
     private external fun jniStartProxy(args: Array<String>): Int
+    private external fun jniIsProxyReady(): Boolean
     private external fun jniStopProxy(): Int
     private external fun jniForceClose(): Int
 }
