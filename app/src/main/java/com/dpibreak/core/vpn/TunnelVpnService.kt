@@ -4,6 +4,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.LocalServerSocket
+import android.net.LocalSocket
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -16,6 +18,8 @@ import com.dpibreak.core.ServiceState
 import com.dpibreak.core.engine.ByedpiJniEngine
 import com.dpibreak.core.tunnel.TunSocksBridge
 import com.dpibreak.domain.Presets
+import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -83,6 +87,12 @@ class TunnelVpnService : VpnService() {
 
     /** Защита от параллельной разборки конвейера двумя потоками. */
     private val cleaning = AtomicBoolean(false)
+
+    /**
+     * Unix-сокет сервера protect() (см. [ProtectSocketServer]). Не null — пока
+     * конвейер собран. Останавливается в [cleanup] перед закрытием TUN.
+     */
+    @Volatile private var protectServer: ProtectSocketServer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -178,8 +188,13 @@ class TunnelVpnService : VpnService() {
 
             // 1. TUN-интерфейс через VpnService.Builder (без root).
             //    Настройки повторяют проверенный эталон (ByeByeDPI): адрес /32,
-            //    маршрут по умолчанию, DNS; своё приложение исключено — так решается
-            //    анти-петля (трафик движка и туннеля идёт мимо VPN).
+            //    маршрут по умолчанию, DNS.
+            //    ВАЖНО про анти-петлю: addDisallowedApplication НЕ исключает наше
+            //    приложение — он лишь запрещает system apps использовать наш туннель.
+            //    Исключение собственного процесса из VPN делает только
+            //    VpnService.protect() для каждого исходящего сокета движка
+            //    (сервер protect(), шаг 2). Поэтому disallowed не используем:
+            //    на части OEM-оболочек он ломает сам запрос VPN-разрешения.
             //    MTU не задаём: при переданном fd туннель использует его только как
             //    размер буфера чтения, на интерфейс не влияет.
             //    establish() может бросить SecurityException, если разрешение VPN
@@ -190,7 +205,6 @@ class TunnelVpnService : VpnService() {
                     .addAddress("10.111.0.2", 32)
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer("1.1.1.1")
-                    .addDisallowedApplication(packageName)
                     .establish()
             }.onFailure { Log.e(TAG, "TUN establish threw", it) }.getOrNull()
 
@@ -202,12 +216,29 @@ class TunnelVpnService : VpnService() {
             Log.i(TAG, "TUN established, fd=${fd.fd}")
             if (stopRequestedDuringStart()) return
 
-            // 2. Движок byedpi: локальный SOCKS5 на 127.0.0.1.
+            // 2. Сервер protect() — ОБЯЗАТЕЛЬНО до движка (см. ProtectSocketServer).
+            //    Без него исходящие сокеты byedpi попадают в тот же TUN → петля
+            //    трафика: «включено, но интернета нет».
+            val protectPath = File(cacheDir, PROTECT_SOCKET_NAME).absolutePath
+            val server = try {
+                ProtectSocketServer(this, protectPath)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Protect socket server failed to start", t)
+                abort("Не удалось поднять сервер protect(): ${t.message}")
+                return
+            }
+            protectServer = server
+            if (stopRequestedDuringStart()) return
+
+            // 3. Движок byedpi: локальный SOCKS5 на 127.0.0.1.
             //    Аргументы — от пресета, выбранного в UI (или сохранённого,
             //    если сервис перезапущен системой с null-intent).
+            //    -P <path>: каждое исходящее соединение ядро маркирует через
+            //    VpnService.protect() (передача fd по Unix-сокету) — трафик
+            //    движка идёт мимо TUN, петли нет.
             val presetArgs = engineArgs ?: Presets.getSelected(this).byedpiArgs
             Log.i(TAG, "Engine preset args: $presetArgs")
-            val port = engine.start(listOf("-i", "127.0.0.1") + presetArgs)
+            val port = engine.start(listOf("-i", "127.0.0.1", "-P", protectPath) + presetArgs)
             if (port == null) {
                 abort(
                     "Движок byedpi не запустился (порт 1080 не открылся). " +
@@ -218,13 +249,13 @@ class TunnelVpnService : VpnService() {
             Log.i(TAG, "byedpi SOCKS5 listening on 127.0.0.1:$port")
             if (stopRequestedDuringStart()) return
 
-            // 3. tun2socks: TUN → SOCKS5.
+            // 4. tun2socks: TUN → SOCKS5.
             if (!TunSocksBridge.start(fd.fd, cacheDir, "127.0.0.1", port)) {
                 abort("Туннель tun2socks не запустился")
                 return
             }
 
-            // 4. Готово. Дальше за состоянием следит watchdog.
+            // 5. Готово. Дальше за состоянием следит watchdog.
             Log.i(TAG, "Pipeline is UP: TUN → byedpi:$port → tun2socks")
             ServiceManager.updateState(ServiceState.Active)
             armWatchdog()
@@ -284,6 +315,11 @@ class TunnelVpnService : VpnService() {
             watchdogTask = null
             runCatching { TunSocksBridge.stop() }
             runCatching { engine.stop() }
+            // Сервер protect() гасим ПОСЛЕ движка (ядро может ещё слать запросы на
+            // -P сокет при завершении) и ДО закрытия TUN: VpnService.protect()
+            // после закрытия интерфейса уже не работает.
+            runCatching { protectServer?.shutdown() }
+            protectServer = null
             runCatching { tunInterface?.close() }
             tunInterface = null
         } catch (t: Throwable) {
@@ -374,6 +410,9 @@ class TunnelVpnService : VpnService() {
         /** StringArrayListExtra: аргументы движка от пресета. */
         const val EXTRA_ENGINE_ARGS = "com.dpibreak.ENGINE_ARGS"
 
+        /** Имя Unix-сокета сервера protect() в cacheDir (путь < 92 символов — лимит sun_path). */
+        private const val PROTECT_SOCKET_NAME = "pr.sock"
+
         /** Первая проверка живости — через секунду после старта. */
         private const val FIRST_CHECK_DELAY_MS = 1000L
 
@@ -387,5 +426,95 @@ class TunnelVpnService : VpnService() {
                 Intent(context, MainActivity::class.java),
                 PendingIntent.FLAG_IMMUTABLE
             )
+    }
+}
+
+/**
+ * Сервер protect() для нативного ядра byedpi (аналогprotect-сервисов из
+ * ethereal/Intra/ByeByeDPI-форков).
+ *
+ * ПРОБЛЕМА, КОТОРУЮ ОН РЕШАЕТ: когда VPN-туннель активен, ВЕСЬ трафик нашего
+ * процесса (включая соединения byedpi в интернет) идёт через TUN → tun2socks →
+ * снова byedpi → снова в TUN. Это петля: приложение «включено», но интернета
+ * нет. Единственный способ разорвать её — пометить исходящие сокеты движка как
+ * защищённые ([VpnService.protect]), чтобы обходной интерфейс их не перехватывал.
+ *
+ * МЕХАНИЗМ: ядро byedpi умеет сам просить protect для каждого нового сокета —
+ * при указанном `-P <path>` оно подключается к нашему Unix-сокету и передаёт
+ * fd сокетовым сообщением (SCM_RIGHTS, см. extend.c:protect()). Здесь мы
+ * принимаем fd, вызываем protect() и отвечаем одним байтом: 1 = успех, 0 = отказ.
+ * Отказ (закрытый туннель) приводит лишь к закрытию одного соединения — ядро
+ * корректно обрабатывает ошибку, процесс не падает.
+ *
+ * ПУТЬ: сокет в cacheDir приложения (доступен тому же UID); имя короткое —
+ * адрес в sun_path ограничен ~108 байтами.
+ */
+private class ProtectSocketServer(
+    private val vpnService: VpnService,
+    private val socketPath: String,
+) {
+
+    private val serverSocket = LocalServerSocket(socketPath)
+
+    /** Поток accept'а: daemon, чтобы зависший сервер не удерживал процесс. */
+    private val acceptThread = Thread({ acceptLoop() }, "DPIBreak-protect").apply {
+        isDaemon = true
+    }
+
+    init {
+        // Старый сокет после убийства процесса мог остаться на диске —
+        // bind() тогда падает с EADDRINUSE. Чистим заранее.
+        runCatching { File(socketPath).delete() }
+        acceptThread.start()
+    }
+
+    private fun acceptLoop() {
+        while (!Thread.currentThread().isInterrupted) {
+            val client = try {
+                serverSocket.accept()
+            } catch (_: IOException) {
+                break // сервер закрыт через shutdown()
+            }
+            try {
+                handleClient(client)
+            } catch (t: Throwable) {
+                Log.w(TAG, "protect request failed", t)
+            } finally {
+                runCatching { client.close() }
+            }
+        }
+    }
+
+    /**
+     * Протокол byedpi (extend.c): клиент шлёт 1 байт + fd в SCM_RIGHTS,
+     * ждёт 1 байт ответа. [LocalSocket.FileDescriptor] приходит уже дублированным
+     * в наше адресное пространство; закрываем его сами (кто получил — тот и закрывает).
+     */
+    private fun handleClient(client: LocalSocket) {
+        val input = client.inputStream
+        val output = client.outputStream
+
+        // Байт-маркер ('1') перед fd — проглатываем, он ничего не значит.
+        if (input.read() == -1) return
+
+        val received = client.takeFileDescriptor() ?: return
+        var ok = false
+        try {
+            ok = vpnService.protect(received.fd)
+            if (!ok) Log.w(TAG, "VpnService.protect(${received.fd}) returned false")
+        } catch (t: Throwable) {
+            Log.e(TAG, "protect() threw", t)
+        } finally {
+            runCatching { received.close() }
+        }
+        // Ядро считает соединение живым только при ответе 1; на 0 оно закрывает сокет.
+        output.write(if (ok) 1 else 0)
+        output.flush()
+    }
+
+    /** Идемпотентная остановка: закрывает listening-сокет (accept бросит IOException). */
+    fun shutdown() {
+        runCatching { serverSocket.close() }
+        runCatching { File(socketPath).delete() }
     }
 }
