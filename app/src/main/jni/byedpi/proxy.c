@@ -35,6 +35,9 @@
     #ifdef __linux__
         /* For SO_ORIGINAL_DST only (which is 0x50) */
         #include "linux/netfilter_ipv4.h"
+        /* Для проверки наличия IPv6-маршрута по умолчанию (v6_route_ok) */
+        #include <linux/rtnetlink.h>
+        #include <stdbool.h>
         #ifndef IP6T_SO_ORIGINAL_DST
         #define IP6T_SO_ORIGINAL_DST SO_ORIGINAL_DST
         #endif
@@ -128,17 +131,38 @@ static inline int nb_socket(int domain, int type)
 
 
 static int resolve(const char *chost, int len, 
+        union sockaddr_u *addr, int type);
+
+// Проверка наличия IPv6-маршрута ВНЕ туннеля (реализация — ниже, перед
+// remote_sock). Объявлена заранее, чтобы resolve() мог на неё опираться.
+static bool v6_route_ok(void);
+
+// Кэш результата v6_route_ok(): зонд дешёвый, но вызывается на каждый резолв
+// с AAAA-результатом, поэтому вычисляем один раз за процесс.
+static int v6_available = -1; // -1 = unknown, 0 = no, 1 = yes
+
+static inline bool ipv6_can_reach(void)
+{
+    if (v6_available < 0) {
+        v6_available = v6_route_ok();
+    }
+    return v6_available;
+}
+
+
+static int resolve(const char *chost, int len, 
         union sockaddr_u *addr, int type) 
 {
     struct addrinfo hints = {0}, *res = 0;
     
     hints.ai_socktype = type;
+    // ВАЖНО (Android + VpnService): флаг AI_ADDRCONFIG НЕ ставим (в отличие от
+    // эталонного десктопного ByeDPI). Он фильтрует результаты getaddrinfo по
+    // «постоянным» (permanent) адресам интерфейсов; на Android у TUN адрес /32
+    // или /128 динамический, и с этим флагом резолв чистых IPv6-хостов
+    // (Twitch pusher/mediaserver, QUIC) возвращает EAI_ADDRFAMILY — соединение
+    // отваливается ещё до создания сокета.
     hints.ai_flags = params.resolve ? 0 : AI_NUMERICHOST;
-    // На Android VpnService: AI_ADDRCONFIG опирается на «постоянные» адреса
-    // интерфейсов, а адрес TUN (/128) таковым не считается — getaddrinfo с
-    // этим флагом на чистом IPv6-хосте (Twitch/pusher/QUIC) возвращает EAI_ADDRFAMILY,
-    // и соединение отваливается ещё до создания сокета. Флаг убираем: у туннеля
-    // есть и v4, и v6 маршруты, резолвить нужно оба семейства.
     hints.ai_family = params.ipv6 ? AF_UNSPEC : AF_INET;
     
     char host[len + 1];
@@ -149,6 +173,23 @@ static int resolve(const char *chost, int len,
     
     if (getaddrinfo(host, 0, &hints, &res) || !res) {
         return -1;
+    }
+    // Если getaddrinfo вернул IPv6-адрес, а физической v6-связности вне
+    // туннеля нет (типично для мобильных сетей), connect() к AAAA даст
+    // ENETUNREACH и соединение умрёт (симптом: «интернет не работает»,
+    // стримы/Twitch встают). Подменяем на A-запись того же имени.
+    if (res->ai_family == AF_INET6 && !ipv6_can_reach()) {
+        freeaddrinfo(res);
+        res = 0;
+        struct addrinfo v4hints = {0};
+        v4hints.ai_socktype = type;
+        v4hints.ai_family = AF_INET;
+        if (!params.resolve)
+            v4hints.ai_flags |= AI_NUMERICHOST;
+        if (getaddrinfo(host, 0, &v4hints, &res) || !res) {
+            return -1;
+        }
+        LOG(LOG_S, "resolve: %s -> forced IPv4 (no v6 route)\n", host);
     }
     memcpy(addr, res->ai_addr, SA_SIZE(res->ai_addr));
     freeaddrinfo(res);
@@ -387,6 +428,46 @@ static int tls_get_addr(
 }
 
     
+// Доступна ли процессу маршрутизация IPv6 ВНЕ туннеля. Сокеты движка защищены
+// VpnService.protect() и ходят через физический интерфейс; на многих мобильных
+// сетях связность только IPv4, и тогда connect() к AAAA-мишени гарантированно
+// даёт ENETUNREACH/EAFNOSUPPORT. getaddrinfo без AI_ADDRCONFIG (см. resolve())
+// мог вернуть сначала именно AAAA — так ломались Twitch/стримы после включения
+// обхода. Проверка дешёвая и не требует привилегий: создаём защищённый
+// неблокирующий UDP-сокет AF_INET6 и пробуем connect() на адрес из RFC 6666
+// (IPv6 DISCARD-ONLY префикс, зарезервирован под «мусор», реально ничего не
+// получает). Если ядро знает v6-маршрут — connect вернёт 0 или EINPROGRESS;
+// если стека/маршрута нет — сразу ошибка. bind/connect у UDP-сокетов вне
+// туннеля безопасны: трафика мы не отправляем.
+static bool v6_route_ok(void)
+{
+    const int fd = socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    // Помечаем сокет защищённым, чтобы сам зонд не ушёл в TUN (петля/ложный
+    // успех через туннельный маршрут ::/0).
+    if (socket_mod(fd) < 0) {
+        close(fd);
+        return 0;
+    }
+    struct sockaddr_in6 sa = {0};
+    sa.sin6_family = AF_INET6;
+    sa.sin6_port = htons(9); // discard
+    inet_pton(AF_INET6, "100::", &sa.sin6_addr); // RFC 6666 discard-only
+    const int err = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+    const int e = get_e();
+    close(fd);
+    return err == 0 || e == EINPROGRESS || e == EAGAIN || e == EALREADY;
+}
+
+
+// prefer_v4() интегрирован непосредственно в resolve() (см. выше): при AAAA-
+// результате и отсутствии v6-маршрута берётся A-запись того же имени. Отдельная
+// функция не нужна — все точки резолва (SOCKS5 ATYP=DOMAIN, HTTP CONNECT,
+// raw-TLS SNI, Shadowsocks) проходят через resolve().
+
+
 static int remote_sock(union sockaddr_u *dst, int type)
 {
     // Семейство исходящего сокета выбираем по адресу НАЗНАЧЕНИЯ:
@@ -1108,6 +1189,7 @@ int listen_socket(const union sockaddr_u *srv)
 
 int run(const union sockaddr_u *srv)
 {
+    v6_available = -1;
     #ifdef SIGPIPE
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
         uniperror("signal SIGPIPE!");
