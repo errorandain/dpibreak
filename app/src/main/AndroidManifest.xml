@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Сеть -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Foreground-сервис VPN (Android 14+ требует тип specialUse) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Уведомление foreground-сервиса (Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- TODO(Задача 10): автозапуск после загрузки -->
+    <!-- <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" /> -->
+
+    <application
+        android:name=".App"
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.DPIBreak">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Сердце приложения: локальный VPN.
+            - BIND_VPN_SERVICE — системное разрешение, только система может подключиться;
+            - intent-filter android.net.VpnService — делает сервис VPN-сервисом
+              (появляется системный диалог разрешения VPN при первом запуске).
+        -->
+        <service
+            android:name=".core.vpn.TunnelVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Local DPI bypass VPN tunnel" />
+        </service>
+
+        <!-- TODO(Задача 8): Quick Settings TileService -->
+        <!-- TODO(Задача 10): BootReceiver для автозапуска -->
+    </application>
+</manifest>

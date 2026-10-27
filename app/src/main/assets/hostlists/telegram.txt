@@ -1,0 +1,10 @@
+# Telegram: домены.
+# ВНИМАНИЕ: если Telegram заблокирован по IP (а не по DPI/SNI),
+# десинхронизация не поможет — см. README.
+telegram.org
+api.telegram.org
+t.me
+telegram.me
+telesco.pe
+cdn.telesco.pe
+cdn1.telesco.pe
