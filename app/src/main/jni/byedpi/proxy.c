@@ -397,6 +397,9 @@ static int remote_sock(union sockaddr_u *dst, int type)
         uniperror("socket");  
         return -1;
     }
+    // Анти-петля: socket_mod() теперь защищает сокет через protect() ПЕРВЫМ
+    // делом — до bind() и connect() ниже (см. extend.c). Порядок критичен для
+    // Android VpnService: protect после bind не удерживается.
     if (socket_mod(sfd) < 0) {
         close(sfd);
         return -1;

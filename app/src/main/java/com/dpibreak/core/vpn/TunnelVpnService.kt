@@ -199,12 +199,18 @@ class TunnelVpnService : VpnService() {
             //    размер буфера чтения, на интерфейс не влияет.
             //    establish() может бросить SecurityException, если разрешение VPN
             //    отозвали в момент вызова (OEM-оболочки), — поэтому в runCatching.
+            // Анти-петля: туннель перехватывает ВЕСЬ трафик приложения, кроме
+            // сокетов, помеченных VpnService.protect() (сервер protect(), шаг 2).
+            // Поэтому own-traffic bypass НЕ включаем: addDisallowedApplication
+            // не действует на собственное приложение, а addAllowedApplication
+            // выгнал бы весь трафик из туннеля (обход перестал бы работать).
             val fd = runCatching {
                 Builder()
                     .setSession("DPIBreak")
                     .addAddress("10.111.0.2", 32)
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer("1.1.1.1")
+                    .setBlocking(true)
                     .establish()
             }.onFailure { Log.e(TAG, "TUN establish threw", it) }.getOrNull()
 

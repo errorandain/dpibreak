@@ -1348,9 +1348,11 @@ int main(int argc, char **argv)
     if (local_port) {
         params.laddr.in.sin_port = htons(atoi(local_port));
         #ifdef __linux__
-        if (!access("protect_path", F_OK)) {
-            params.protect_path = "protect_path";
-        }
+        // Отключено в форке DPIBreak: проверка файла с ЛИТЕРАЛЬНЫМ именем
+        // "protect_path" в рабочей директории процесса. В Android она лишена
+        // смысла и может включить protect без нашего Unix-сокета -> все
+        // соединения движка умрут (петля лечится только через -P <path>).
+        // Реальный путь задаётся аргументом -P из TunnelVpnService.
         #endif
         params.mode |= MODE_SHADOWSOCKS;
     }
