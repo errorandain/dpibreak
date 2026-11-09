@@ -18,11 +18,6 @@ import java.net.Socket
  * закрывается самим ядром. Поэтому stop() сначала просит ядро остановиться
  * мягко (shutdown), ждёт завершения потока, и только если поток завис — делает
  * forceClose. Так мы не закрываем чужие дескрипторы.
- *
- * Поток — «родной» [Thread], а не корутина: main() ядра блокирует поток до
- * остановки, отменить такую корутину нельзя (job.cancel() не прерывает нативный
- * вызов), а отложенный корутинами пул только создаёт иллюзию отмены. Поток —
- * daemon, поэтому зависшее ядро не удержит процесс от завершения.
  */
 class ByedpiJniEngine : DesyncEngine {
 
@@ -36,6 +31,9 @@ class ByedpiJniEngine : DesyncEngine {
 
         /** Сколько ждём открытия порта SOCKS5. */
         private const val PORT_WAIT_MS = 5_000L
+
+        /** Таймаут одной проверки рукопожатия SOCKS5 (как в ByeByeDPI NativeSession). */
+        private const val PROBE_TIMEOUT_MS = 250
 
         /** Сколько ждём мягкого завершения потока ядра. */
         private const val SOFT_STOP_WAIT_MS = 2_000L
@@ -52,24 +50,36 @@ class ByedpiJniEngine : DesyncEngine {
     /** Поток, в котором работает main() ядра. Не null — пока поток не завершён. */
     @Volatile private var coreThread: Thread? = null
 
+    @Volatile private var activePort: Int = DEFAULT_SOCKS_PORT
+
+    /** Включить/выключить отбрасывание QUIC (UDP 443) на уровне локального прокси. */
+    fun setDropQuic(drop: Boolean) {
+        runCatching { jniSetDropQuic(drop) }
+            .onFailure { Log.w(TAG, "jniSetDropQuic failed: ${it.message}") }
+    }
+
     /**
      * {@inheritDoc}
      *
-     * Метод блокирующий (ожидает порт) — вызывать только из фонового потока.
+     * Метод блокирующий (ожидает порт и рукопожатие SOCKS5) — вызывать только из фонового потока.
      */
-    override fun start(args: List<String>): Int? {
+    override fun start(args: List<String>): Int? = start(args, DEFAULT_SOCKS_PORT)
+
+    /**
+     * Запускает локальный SOCKS5-прокси ядра byedpi на указанном [port].
+     */
+    fun start(args: List<String>, port: Int): Int? {
         if (_isRunning.value) {
-            return DEFAULT_SOCKS_PORT
+            return activePort
         }
-        // Поток прошлого запуска ещё жив (ядро не отреагировало на остановку) —
-        // новый main() поднимать нельзя: нативная сторона вернёт ошибку.
+        // Поток прошлого запуска ещё жив — новый main() поднимать нельзя.
         coreThread?.takeIf { it.isAlive }?.let {
             Log.e(TAG, "Previous byedpi thread is still alive — cannot start a new one")
             return null
         }
         coreThread = null
 
-        val allArgs = listOf("-p", DEFAULT_SOCKS_PORT.toString()) + args
+        val allArgs = listOf("-p", port.toString()) + args
         Log.i(TAG, "Starting byedpi with args: $allArgs")
 
         val thread = Thread {
@@ -82,39 +92,45 @@ class ByedpiJniEngine : DesyncEngine {
         coreThread = thread
         thread.start()
 
-        // Ждём открытия порта SOCKS5 именно нашим экземпляром byedpi
+        // Ждём готовности SOCKS5 с полноценной проверкой приветствия (0x05, 0x01, 0x00 -> 0x05, 0x00),
+        // точно как в эталонном ByeByeDPI (NativeSession.awaitProxy).
         val deadline = System.currentTimeMillis() + PORT_WAIT_MS
         while (System.currentTimeMillis() < deadline) {
             if (!thread.isAlive) {
-                // main() завершился раньше, чем порт открылся — ошибка запуска
                 Log.e(TAG, "byedpi main() exited before opening port")
                 coreThread = null
                 _isRunning.value = false
                 return null
             }
-            if (jniIsProxyReady()) {
-                try {
-                    Socket().use { s ->
-                        s.connect(InetSocketAddress("127.0.0.1", DEFAULT_SOCKS_PORT), 500)
-                    }
-                    if (!thread.isAlive) {
-                        coreThread = null
-                        _isRunning.value = false
-                        return null
-                    }
-                    Log.i(TAG, "SOCKS5 port $DEFAULT_SOCKS_PORT is open")
-                    _isRunning.value = true
-                    return DEFAULT_SOCKS_PORT
-                } catch (_: IOException) {
-                    // Сокет ещё переходит в listen — подождём следующую итерацию
+            if (jniIsProxyReady() && probeSocks5Handshake("127.0.0.1", port)) {
+                if (!thread.isAlive) {
+                    coreThread = null
+                    _isRunning.value = false
+                    return null
                 }
+                Log.i(TAG, "SOCKS5 port $port is open and verified")
+                activePort = port
+                _isRunning.value = true
+                return port
             }
             Thread.sleep(50)
         }
 
-        Log.e(TAG, "SOCKS5 port was not opened within ${PORT_WAIT_MS / 1000} seconds")
+        Log.e(TAG, "SOCKS5 port $port was not opened within ${PORT_WAIT_MS / 1000} seconds")
         stop()
         return null
+    }
+
+    private fun probeSocks5Handshake(host: String, port: Int): Boolean = try {
+        Socket().use { s ->
+            s.connect(InetSocketAddress(host, port), PROBE_TIMEOUT_MS)
+            s.soTimeout = PROBE_TIMEOUT_MS
+            s.getOutputStream().write(byteArrayOf(0x05, 0x01, 0x00))
+            val input = s.getInputStream()
+            input.read() == 0x05 && input.read() == 0x00
+        }
+    } catch (_: IOException) {
+        false
     }
 
     override fun stop() {
@@ -150,6 +166,7 @@ class ByedpiJniEngine : DesyncEngine {
 
     private external fun jniStartProxy(args: Array<String>): Int
     private external fun jniIsProxyReady(): Boolean
+    private external fun jniSetDropQuic(drop: Boolean)
     private external fun jniStopProxy(): Int
     private external fun jniForceClose(): Int
 }

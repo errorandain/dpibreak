@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -27,44 +28,40 @@ import java.util.concurrent.atomic.AtomicBoolean
 private const val TAG = "DPIBreak"
 
 /**
- * VPN-сервис: собирает конвейер обхода.
+ * VPN-сервис: собирает конвейер обхода по эталонной схеме ByeByeDPI
+ * (`ByeDpiVpnService` + `NativeSession` + `PrivateDnsUtils`):
  *
  *   приложения → TUN-интерфейс → tun2socks (hev-socks5-tunnel, vendored)
  *   → SOCKS5 (byedpi, vendored) → интернет с десинхронизацией DPI.
  *
- * Порядок запуска: startForeground → TUN → ProtectSocketServer → движок byedpi → tun2socks.
- * Порядок остановки — строго обратный.
- *
- * ### Почему всё делает один сериализованный поток ([worker])
- * Запуск и разборка выполняются строго по очереди в одном потоке [worker],
- * чтобы исключить гонки за дескриптор TUN и нативные потоки. При этом сигнал
- * [stopping] выставляется сразу при приходе команды остановки — если конвейер
- * ещё поднимается, он прервётся между этапами, не дожидаясь полного таймаута.
- *
- * ### Почему нельзя блокировать главный поток
- * `TProxyStopService()` (join потока туннеля) и остановка движка (до 2,5 с) —
- * блокирующие. В главном потоке это ANR/зависание при остановке. Поэтому и
- * `onDestroy` только ставит задачу в очередь, а не разбирает конвейер сам.
+ * Ключевые решения из эталона ByeByeDPI:
+ *  1) По умолчанию IPv6 в TUN ВЫКЛЮЧЕН (`ipv6Enabled = false`): на мобильных
+ *     сетях без реального внешнего IPv6 маршрут `::/0` заставлял YouTube/Discord
+ *     стучаться по IPv6, `tun2socks` локально завершал TCP-рукопожатие (отменяя
+ *     откат Happy Eyeballs на IPv4), после чего `byedpi` получал `ENETUNREACH`.
+ *  2) Если в Android настроен «Персональный DNS» (Private DNS / DoT), мы НЕ
+ *     перезаписываем его через `addDnsServer("1.1.1.1")` (проверяется ДО `establish()`).
+ *  3) В режиме всего трафика приложение исключает само себя на уровне ядра через
+ *     `addDisallowedApplication(packageName)` и запускает `byedpi` ДО `establish()`,
+ *     чтобы к моменту включения маршрутов прокси уже принимал пакеты. Для будущего
+ *     белого списка приложений (Задача 7, `addAllowedApplication`) сохранён
+ *     резервный сервер [ProtectSocketServer] (`-P`).
  */
 class TunnelVpnService : VpnService() {
 
-    /**
-     * Дескриптор TUN. [Volatile] — читается из watchdog-потока, пишется из [worker].
-     * `null` означает «конвейер не собран».
-     */
+    /** Дескриптор TUN. `null` означает «конвейер не собран». */
     @Volatile private var tunInterface: ParcelFileDescriptor? = null
 
-    /** Аргументы движка от выбранного пресета (приходят с ACTION_START). */
+    /** Аргументы движка от выбранной стратегии (приходят с ACTION_START). */
     @Volatile private var engineArgs: List<String>? = null
+
+    @Volatile private var ipv6Enabled: Boolean? = null
+    @Volatile private var blockQuic: Boolean? = null
 
     /** Идёт ли сейчас сборка конвейера (нужно для осмысленных проверок в watchdog). */
     @Volatile private var startingTunnel = false
 
-    /**
-     * Должен ли туннель быть запущен согласно последней команде, пришедшей в сервис.
-     * Защищает быстрый сценарий «Выкл → Вкл»: старая остановка не вызовет stopSelf(),
-     * если следом уже пришёл новый ACTION_START.
-     */
+    /** Должен ли туннель быть запущен согласно последней команде. */
     @Volatile private var desiredRunning = false
 
     private val engine = ByedpiJniEngine()
@@ -74,11 +71,7 @@ class TunnelVpnService : VpnService() {
         Thread(runnable, "DPIBreak-worker").apply { isDaemon = true }
     }
 
-    /**
-     * Поток-смотритель. Раз в [HEALTH_INTERVAL_SEC] проверяет, что поток туннеля
-     * и движок живы. Без него «тихая смерть» туннеля (убитый системой byedpi,
-     * умерший поток tun2socks) выглядит как «всё включено, но интернета нет».
-     */
+    /** Поток-смотритель за живостью туннеля и движка. */
     private val watchdog: ScheduledExecutorService =
         Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "DPIBreak-watchdog").apply { isDaemon = true }
@@ -92,16 +85,11 @@ class TunnelVpnService : VpnService() {
     /** Защита от параллельной разборки конвейера двумя потоками. */
     private val cleaning = AtomicBoolean(false)
 
-    /**
-     * Unix-сокет сервера protect() (см. [ProtectSocketServer]). Не null — пока
-     * конвейер собран. Останавливается в [cleanup] после движка и перед закрытием TUN.
-     */
+    /** Резервный Unix-сокет сервера protect() (для режимов без addDisallowedApplication). */
     @Volatile private var protectServer: ProtectSocketServer? = null
 
     override fun onCreate() {
         super.onCreate()
-        // Канал создаётся в App.onCreate; продублируем здесь — сервис обязан иметь
-        // канал ДО первого startForeground(), иначе часть оболочек тихо теряет уведомление.
         NotificationUtils.createNotificationChannel(this)
     }
 
@@ -112,20 +100,30 @@ class TunnelVpnService : VpnService() {
                     return START_NOT_STICKY
                 }
                 engineArgs = intent.getStringArrayListExtra(EXTRA_ENGINE_ARGS)
+                ipv6Enabled = if (intent.hasExtra(EXTRA_IPV6_ENABLED)) {
+                    intent.getBooleanExtra(EXTRA_IPV6_ENABLED, false)
+                } else {
+                    null
+                }
+                blockQuic = if (intent.hasExtra(EXTRA_BLOCK_QUIC)) {
+                    intent.getBooleanExtra(EXTRA_BLOCK_QUIC, false)
+                } else {
+                    null
+                }
                 desiredRunning = true
                 stopping.set(false)
                 worker.execute { startTunnel() }
                 return START_STICKY
             }
 
-            // Перерождение сервиса системой после убийства процесса: пресет берём
-            // из сохранённых настроек; обязательно сразу вызываем startForeground().
             null -> {
                 if (!startInForeground()) {
                     return START_NOT_STICKY
                 }
                 Log.i(TAG, "Service redelivered with null intent — resuming tunnel")
                 engineArgs = null
+                ipv6Enabled = null
+                blockQuic = null
                 desiredRunning = true
                 stopping.set(false)
                 worker.execute { startTunnel() }
@@ -149,16 +147,10 @@ class TunnelVpnService : VpnService() {
         }
     }
 
-    /**
-     * Выводит сервис на передний план.
-     * @return false, если система запретила foreground (Android 12+ может отказать
-     *  при запуске из фона) — тогда сервис останавливается с внятной ошибкой.
-     */
     private fun startInForeground(): Boolean = try {
         val presetTitle = Presets.getSelected(this).title
         val notification = NotificationUtils.createNotification(this, contentIntent(this), presetTitle)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // Android 14+: тип foreground-сервиса обязателен (specialUse — в манифесте)
             ServiceCompat.startForeground(
                 this, NotificationUtils.NOTIFICATION_ID, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -181,9 +173,66 @@ class TunnelVpnService : VpnService() {
     }
 
     /**
+     * Проверяет, включён ли в системе «Персональный DNS» (Private DNS / DoT).
+     * Вызывать СТРОГО ДО `Builder.establish()`, пока активной сетью является
+     * физический мобильный интернет или Wi-Fi (как в `PrivateDnsUtils` у ByeByeDPI).
+     */
+    private fun isPrivateDnsConfigured(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return false
+            val network = cm.activeNetwork ?: return false
+            val linkProps = cm.getLinkProperties(network) ?: return false
+            !linkProps.privateDnsServerName.isNullOrBlank()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to read Private DNS state", t)
+            false
+        }
+    }
+
+    private fun buildTunnelBuilder(
+        enableIpv6: Boolean,
+        privateDnsConfigured: Boolean,
+    ): Pair<Builder, Boolean> {
+        val builder = Builder()
+            .setSession("DPIBreak")
+            .setConfigureIntent(contentIntent(this))
+            .addAddress("10.10.10.10", 32)
+            .addRoute("0.0.0.0", 0)
+
+        if (enableIpv6) {
+            builder.addAddress("fd00::1", 128)
+                .addRoute("::", 0)
+        }
+
+        if (!privateDnsConfigured) {
+            builder.addDnsServer("1.1.1.1")
+            if (enableIpv6) {
+                builder.addDnsServer("2606:4700:4700::1111")
+            }
+        } else {
+            Log.i(TAG, "Private DNS is configured in Android — skipping VPN DNS override")
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setMetered(false)
+        }
+
+        // Исключаем само приложение из TUN на уровне ядра (как в ByeByeDPI):
+        // ни сокеты byedpi, ни системные DNS-запросы нашего процесса не уходят в петлю.
+        val selfExcluded = runCatching {
+            builder.addDisallowedApplication(packageName)
+            true
+        }.onFailure {
+            Log.w(TAG, "addDisallowedApplication($packageName) failed, falling back to -P", it)
+        }.getOrDefault(false)
+
+        return builder to selfExcluded
+    }
+
+    /**
      * Поднимает весь конвейер. Выполняется ТОЛЬКО на [worker].
-     * О любой ошибке сообщает через [ServiceManager] — текст виден на главном
-     * экране и сильно упрощает диагностику.
      */
     private fun startTunnel() {
         if (!desiredRunning || stopping.get()) {
@@ -198,72 +247,100 @@ class TunnelVpnService : VpnService() {
         }
         startingTunnel = true
         try {
-            Log.i(TAG, "Starting tunnel pipeline…")
+            val useIpv6 = ipv6Enabled ?: Presets.isIpv6Enabled(this)
+            val dropQuic = blockQuic ?: Presets.isBlockQuicEnabled(this)
+            val presetArgs = engineArgs ?: Presets.resolveEffectiveArgs(this)
+            val privateDnsActive = isPrivateDnsConfigured()
 
-            // 1. TUN-интерфейс через VpnService.Builder (без root).
-            //    Анти-петля обеспечивается сервером protect() на шаге 2: каждое
-            //    исходящее в интернет соединение byedpi помечается VpnService.protect().
-            val fd = runCatching {
-                Builder()
-                    .setSession("DPIBreak")
-                    .addAddress("10.111.0.2", 32)
-                    .addRoute("0.0.0.0", 0)
-                    // IPv6: адрес fd00::2/128 и маршрут ::/0, чтобы v6-трафик
-                    // тоже шёл через туннель, а не мимо него. Если сеть без IPv6,
-                    // Android просто не использует v6-маршрут.
-                    .addAddress("fd00::2", 128)
-                    .addRoute("::", 0)
-                    .addDnsServer("1.1.1.1")
-                    .addDnsServer("2606:4700:4700::1111")
-                    .setBlocking(true)
-                    .establish()
-            }.onFailure { Log.e(TAG, "TUN establish threw", it) }.getOrNull()
+            Log.i(
+                TAG,
+                "Starting tunnel pipeline (ipv6=$useIpv6, dropQuic=$dropQuic, " +
+                    "privateDns=$privateDnsActive, args=$presetArgs)…"
+            )
 
-            if (fd == null) {
-                abort("Не удалось создать TUN-интерфейс (разрешение VPN отозвано?)")
-                return
+            engine.setDropQuic(dropQuic)
+            val (builder, selfExcluded) = buildTunnelBuilder(useIpv6, privateDnsActive)
+
+            val ipv6Args = if (!useIpv6 && "-X" !in presetArgs && "--no-ipv6" !in presetArgs) {
+                listOf("-X")
+            } else {
+                emptyList()
             }
-            tunInterface = fd
-            Log.i(TAG, "TUN established, fd=${fd.fd}")
-            if (stopRequestedDuringStart()) return
 
-            // 2. Сервер protect() — ОБЯЗАТЕЛЬНО до движка (см. ProtectSocketServer).
-            //    Без него исходящие сокеты byedpi попадают в тот же TUN → петля
-            //    трафика: «включено, но интернета нет».
-            val protectPath = File(cacheDir, PROTECT_SOCKET_NAME).absolutePath
-            val server = try {
-                ProtectSocketServer(this, protectPath)
-            } catch (t: Throwable) {
-                Log.e(TAG, "Protect socket server failed to start", t)
-                abort("Не удалось поднять сервер protect(): ${t.message}")
-                return
-            }
-            protectServer = server
-            if (stopRequestedDuringStart()) return
+            val port: Int
+            val fd: ParcelFileDescriptor
 
-            // 3. Движок byedpi: локальный SOCKS5 на 127.0.0.1.
-            //    -P <path>: каждое исходящее соединение ядро маркирует через
-            //    VpnService.protect() (передача fd по Unix-сокету в файловой системе).
-            val presetArgs = engineArgs ?: Presets.getSelected(this).byedpiArgs
-            Log.i(TAG, "Engine preset args: $presetArgs")
-            val port = engine.start(listOf("-i", "127.0.0.1", "-P", protectPath) + presetArgs)
-            if (port == null) {
-                abort(
-                    "Движок byedpi не запустился (порт ${ByedpiJniEngine.DEFAULT_SOCKS_PORT} не открылся). " +
-                        "В logcat ищите тег proxy — там причина."
+            if (selfExcluded) {
+                // Эталонный порядок ByeByeDPI (NativeSession.startNative):
+                // 1) поднимаем и проверяем SOCKS5 byedpi;
+                // 2) открываем TUN-интерфейс (прокси уже слушает);
+                // 3) запускаем tun2socks.
+                val startPort = engine.start(listOf("-i", "127.0.0.1") + ipv6Args + presetArgs)
+                if (startPort == null) {
+                    abort(
+                        "Движок byedpi не запустился. Проверьте синтаксис строки аргументов " +
+                            "(в logcat ищите теги DPIBreak и proxy)."
+                    )
+                    return
+                }
+                port = startPort
+                if (stopRequestedDuringStart()) return
+
+                val established = runCatching { builder.establish() }
+                    .onFailure { Log.e(TAG, "TUN establish threw", it) }
+                    .getOrNull()
+                if (established == null) {
+                    abort("Не удалось создать TUN-интерфейс (разрешение VPN отозвано?)")
+                    return
+                }
+                fd = established
+                tunInterface = fd
+            } else {
+                // Резервный путь через ProtectSocketServer (-P): сначала нужен активный TUN,
+                // чтобы Android разрешил VpnService.protect().
+                val established = runCatching { builder.establish() }
+                    .onFailure { Log.e(TAG, "TUN establish threw", it) }
+                    .getOrNull()
+                if (established == null) {
+                    abort("Не удалось создать TUN-интерфейс (разрешение VPN отозвано?)")
+                    return
+                }
+                fd = established
+                tunInterface = fd
+                if (stopRequestedDuringStart()) return
+
+                val protectPath = File(cacheDir, PROTECT_SOCKET_NAME).absolutePath
+                val server = try {
+                    ProtectSocketServer(this, protectPath)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Protect socket server failed to start", t)
+                    abort("Не удалось поднять сервер protect(): ${t.message}")
+                    return
+                }
+                protectServer = server
+                if (stopRequestedDuringStart()) return
+
+                val startPort = engine.start(
+                    listOf("-i", "127.0.0.1", "-P", protectPath) + ipv6Args + presetArgs
                 )
-                return
+                if (startPort == null) {
+                    abort(
+                        "Движок byedpi не запустился. Проверьте синтаксис строки аргументов " +
+                            "(в logcat ищите теги DPIBreak и proxy)."
+                    )
+                    return
+                }
+                port = startPort
             }
-            Log.i(TAG, "byedpi SOCKS5 listening on 127.0.0.1:$port")
+
+            Log.i(TAG, "TUN established (fd=${fd.fd}), byedpi listening on 127.0.0.1:$port")
             if (stopRequestedDuringStart()) return
 
-            // 4. tun2socks: TUN → SOCKS5.
             if (!TunSocksBridge.start(fd.fd, cacheDir, "127.0.0.1", port)) {
                 abort("Туннель tun2socks не запустился")
                 return
             }
 
-            // 5. Готово. Дальше за состоянием следит watchdog.
             Log.i(TAG, "Pipeline is UP: TUN → tun2socks → byedpi:$port")
             ServiceManager.updateState(ServiceState.Active)
             armWatchdog()
@@ -275,10 +352,6 @@ class TunnelVpnService : VpnService() {
         }
     }
 
-    /**
-     * Проверка между этапами запуска: остановку мог запросить пользователь,
-     * пока мы ждали порт SOCKS5. Возвращает true, если дальше идти нельзя.
-     */
     private fun stopRequestedDuringStart(): Boolean {
         if (!stopping.get() && desiredRunning) return false
         Log.w(TAG, "Stop requested during start — rolling back the started part")
@@ -286,27 +359,19 @@ class TunnelVpnService : VpnService() {
         return true
     }
 
-    /** Провал на одном из этапов запуска: человекочитаемая ошибка + разборка. */
     private fun abort(message: String) {
         Log.e(TAG, message)
         desiredRunning = false
-        // restoreIdle = false: не затираем текст ошибки, который только что выставили.
         ServiceManager.updateState(ServiceState.Error(message))
         cleanup(restoreIdle = false)
     }
 
-    /**
-     * Штатная остановка на потоке [worker].
-     */
     private fun stopTunnel() {
         cleanup(restoreIdle = !desiredRunning)
     }
 
     /**
      * Разбор конвейера в обратном порядке: tun2socks → движок → protectServer → TUN.
-     * Идемпотентен: повторный вызов из другого потока просто выходит.
-     *
-     * @param restoreIdle false, если состояние уже [ServiceState.Error] — не затираем текст.
      */
     private fun cleanup(restoreIdle: Boolean) {
         if (!cleaning.compareAndSet(false, true)) {
@@ -319,8 +384,6 @@ class TunnelVpnService : VpnService() {
             watchdogTask = null
             runCatching { TunSocksBridge.stop() }
             runCatching { engine.stop() }
-            // Сервер protect() гасим ПОСЛЕ движка (ядро может ещё слать запросы на
-            // -P сокет при завершении) и ДО закрытия TUN.
             runCatching { protectServer?.shutdown() }
             protectServer = null
             runCatching { tunInterface?.close() }
@@ -340,11 +403,6 @@ class TunnelVpnService : VpnService() {
         }
     }
 
-    /**
-     * Смотритель за живостью конвейера.
-     *
-     * Первая проверка — через 1 с после старта, дальше — раз в [HEALTH_INTERVAL_SEC] с.
-     */
     private fun armWatchdog() {
         watchdogTask?.cancel(false)
         watchdogTask = watchdog.scheduleWithFixedDelay({
@@ -369,11 +427,6 @@ class TunnelVpnService : VpnService() {
         }, 1L, HEALTH_INTERVAL_SEC, TimeUnit.SECONDS)
     }
 
-    /**
-     * Реакция watchdog'а. Разборку выполняем на [worker] и ПОВТОРНО проверяем
-     * состояние уже там: пока задача ждала своей очереди, конвейер мог штатно
-     * остановиться или перезапуститься.
-     */
     private fun abortFromWatchdog(message: String) {
         worker.execute {
             if (!startingTunnel && !stopping.get() && desiredRunning && tunInterface != null) {
@@ -382,7 +435,6 @@ class TunnelVpnService : VpnService() {
         }
     }
 
-    /** Разрешение VPN отозвано пользователем из системных настроек. */
     override fun onRevoke() {
         Log.w(TAG, "onRevoke: VPN permission revoked")
         desiredRunning = false
@@ -392,8 +444,6 @@ class TunnelVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        // Если сервис убит системой без штатной остановки — прибираемся в worker
-        // (блокирующие вызовы в главном потоке приведут к ANR).
         desiredRunning = false
         stopping.set(true)
         watchdogTask?.cancel(false)
@@ -410,8 +460,14 @@ class TunnelVpnService : VpnService() {
         const val ACTION_START = "com.dpibreak.START"
         const val ACTION_STOP = "com.dpibreak.STOP"
 
-        /** StringArrayListExtra: аргументы движка от пресета. */
+        /** StringArrayListExtra: аргументы движка от выбранной стратегии. */
         const val EXTRA_ENGINE_ARGS = "com.dpibreak.ENGINE_ARGS"
+
+        /** BooleanExtra: включать ли IPv6 в TUN (по умолчанию false, как в ByeByeDPI). */
+        const val EXTRA_IPV6_ENABLED = "com.dpibreak.IPV6_ENABLED"
+
+        /** BooleanExtra: блокировать ли QUIC (UDP 443) для перехода YouTube на TCP. */
+        const val EXTRA_BLOCK_QUIC = "com.dpibreak.BLOCK_QUIC"
 
         /** Имя Unix-сокета сервера protect() в cacheDir (путь < 108 байт — лимит sun_path). */
         private const val PROTECT_SOCKET_NAME = "pr.sock"
@@ -419,7 +475,6 @@ class TunnelVpnService : VpnService() {
         /** Интервал контроля живости конвейера (в секундах). */
         private const val HEALTH_INTERVAL_SEC = 30L
 
-        /** PendingIntent: открыть приложение по нажатию на уведомление. */
         fun contentIntent(context: Context): PendingIntent =
             PendingIntent.getActivity(
                 context, 0,
@@ -430,18 +485,7 @@ class TunnelVpnService : VpnService() {
 }
 
 /**
- * Сервер protect() для нативного ядра byedpi.
- *
- * Когда VPN-туннель активен, трафик нашего процесса шёл бы обратно в TUN (петля).
- * При запуске с `-P <path>` ядро byedpi перед каждым исходящим соединением
- * подключается к нашему Unix-сокету в файловой системе (`cacheDir/pr.sock`) и
- * одним сообщением `sendmsg()` присылает 1 байт-маркер + fd сокета в SCM_RIGHTS
- * (см. `byedpi/extend.c:protect`). Сервер вызывает [VpnService.protect] и
- * отвечает одним байтом: `1` = успех, `0` = отказ.
- *
- * Вся работа с AF_UNIX в файловой системе и приёмом SCM_RIGHTS вынесена в C
- * (`native-lib.c`), потому что Android `LocalServerSocket(String)` биндится в
- * abstract namespace, а `LocalSocket.getAncillaryFileDescriptors()` теряет fd.
+ * Резервный сервер protect() для нативного ядра byedpi (при запуске с `-P <path>`).
  *
  * ВНИМАНИЕ: при переименовании класса/пакета обновить имена JNI-функций в
  * `native-lib.c` и правило в `app/proguard-rules.pro`.
@@ -489,8 +533,6 @@ internal class ProtectSocketServer(
             val connFd = jniRecvProtectedFd(clientFd)
             if (connFd >= 0) {
                 try {
-                    // VpnService.protect(int) помечает сокет защищённым и НЕ забирает
-                    // владение дескриптором — полученную из SCM_RIGHTS копию закрываем сами.
                     ok = vpnService.protect(connFd)
                     if (!ok) {
                         Log.w(TAG, "VpnService.protect() returned false")
@@ -508,7 +550,6 @@ internal class ProtectSocketServer(
         }
     }
 
-    /** Идемпотентная остановка: будит accept() через shutdown() и ждёт поток. */
     fun shutdown() {
         if (!closed.compareAndSet(false, true)) return
         jniShutdownSocket(serverFd)

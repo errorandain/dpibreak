@@ -36,6 +36,7 @@
 #define DPIBREAK_ERR_NOMEM   (-1)  /* не хватило памяти под argv */
 
 extern volatile int server_fd;
+extern volatile int g_drop_quic;
 extern int byedpi_main(int argc, char **argv);
 
 static volatile int g_proxy_running = 0;
@@ -93,6 +94,9 @@ Java_com_dpibreak_core_engine_ByedpiJniEngine_jniStartProxy(JNIEnv *env,
     }
     argv[argc] = NULL;
 
+    #ifdef __BIONIC__
+    optreset = 1;            /* сброс внутреннего указателя Bionic getopt_long */
+    #endif
     optind = 1;              /* сброс getopt для повторного запуска ядра */
     server_fd = -1;
     g_proxy_running = 1;
@@ -116,6 +120,14 @@ Java_com_dpibreak_core_engine_ByedpiJniEngine_jniIsProxyReady(
         __attribute__((unused)) JNIEnv *env,
         __attribute__((unused)) jobject thiz) {
     return (g_proxy_running && server_fd >= 0) ? JNI_TRUE : JNI_FALSE;
+}
+
+/* Отбрасывать ли QUIC (UDP-пакеты на порт 443), заставляя клиентов переходить на TCP. */
+JNIEXPORT void JNICALL
+Java_com_dpibreak_core_engine_ByedpiJniEngine_jniSetDropQuic(
+        __attribute__((unused)) JNIEnv *env,
+        __attribute__((unused)) jobject thiz, jboolean drop) {
+    g_drop_quic = (drop == JNI_TRUE) ? 1 : 0;
 }
 
 /* Мягкая остановка: shutdown выводит main() из цикла событий. Безопасна повторно. */

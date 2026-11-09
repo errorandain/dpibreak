@@ -45,6 +45,7 @@
 
 
 volatile int server_fd = -1;
+volatile int g_drop_quic = 0;
 
 static void on_cancel(int sig) {
     int fd = server_fd;
@@ -917,14 +918,21 @@ int on_udp_tunnel(struct poolhd *pool, struct eval *val, int et)
                 LOG(LOG_E, "udp parse error\n");
                 return -1;
             }
-            if (!pair->addr.in.sin_port) {
-                map_fix(&addr, 0);
-                if (!params.ipv6 && addr.sa.sa_family == AF_INET6) {
+            map_fix(&addr, 0);
+            if (g_drop_quic && ntohs(addr.in.sin_port) == 443) {
+                if (!pair->addr.in.sin_port) {
                     return -1;
                 }
-                // В UDP ASSOCIATE клиент (tun2socks) передаёт 0.0.0.0:0 (AF_INET),
-                // поэтому ufd изначально AF_INET. Если реальная цель первой
-                // датаграммы оказалась IPv6 — переоткрываем защищённый AF_INET6-сокет.
+                continue;
+            }
+            if (!params.ipv6 && addr.sa.sa_family == AF_INET6) {
+                return -1;
+            }
+            if (!pair->addr.in.sin_port ||
+                    pair->addr.in.sin_port != addr.in.sin_port ||
+                    !addr_equ(&pair->addr, &addr)) {
+                // В UDP ASSOCIATE клиент (tun2socks, Fullcone NAT) передаёт 0.0.0.0:0
+                // и может менять целевой адрес в рамках одной сессии (например, STUN -> голос).
                 if (pair->addr.sa.sa_family != addr.sa.sa_family) {
                     int new_ufd = remote_sock(&addr, SOCK_DGRAM);
                     if (new_ufd < 0) {
@@ -944,6 +952,9 @@ int on_udp_tunnel(struct poolhd *pool, struct eval *val, int et)
                     return -1;
                 }
                 pair->addr = addr;
+                if (pair->pair) {
+                    pair->pair->dp = 0;
+                }
             }
             ns = udp_hook(pair, data + offs, n - offs, &pair->addr);
         }

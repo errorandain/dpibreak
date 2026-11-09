@@ -82,20 +82,22 @@ object ServiceManager {
 
         val appContext = context.applicationContext
 
-        // Выбранный пресет передаётся в сервис аргументами движка
+        // Выбранная стратегия и настройки туннеля передаются в сервис через Intent
         val preset = Presets.getSelected(appContext)
+        val effectiveArgs = Presets.resolveEffectiveArgs(appContext, preset)
         val intent = Intent(appContext, TunnelVpnService::class.java).apply {
             action = TunnelVpnService.ACTION_START
             putStringArrayListExtra(
                 TunnelVpnService.EXTRA_ENGINE_ARGS,
-                ArrayList(preset.byedpiArgs)
+                ArrayList(effectiveArgs)
             )
+            putExtra(TunnelVpnService.EXTRA_IPV6_ENABLED, Presets.isIpv6Enabled(appContext))
+            putExtra(TunnelVpnService.EXTRA_BLOCK_QUIC, Presets.isBlockQuicEnabled(appContext))
         }
 
         try {
             appContext.startForegroundService(intent)
         } catch (t: Throwable) {
-            // Android 12+ может отказать в старте foreground-сервиса из фона.
             Log.e(TAG, "startForegroundService rejected", t)
             updateState(
                 ServiceState.Error(
@@ -120,7 +122,6 @@ object ServiceManager {
                     }
                 }
                 if (timedOut) {
-                    // Страховка: если сервис живой, но завис, не оставляем его висеть.
                     runCatching {
                         appContext.stopService(
                             Intent(appContext, TunnelVpnService::class.java)
@@ -133,10 +134,6 @@ object ServiceManager {
 
     /**
      * Останавливает VPN-сервис.
-     *
-     * Состояние здесь НЕ меняется: Active → Idle переведёт сам сервис, когда
-     * разберёт конвейер (иначе UI «опережает» реальность). Если он не ответит
-     * за [STOP_TIMEOUT_MS], состояние сбрасываем принудительно.
      */
     fun stop(context: Context) {
         val appContext = context.applicationContext
@@ -145,8 +142,6 @@ object ServiceManager {
             stopIntent.action = TunnelVpnService.ACTION_STOP
             appContext.startService(stopIntent)
         } catch (t: Throwable) {
-            // Приложение уже в фоне и startService недоступен — просим систему
-            // остановить сервис напрямую (разборку сделаем в onDestroy).
             Log.w(TAG, "ACTION_STOP delivery failed, falling back to stopService", t)
             runCatching { appContext.stopService(stopIntent) }
         }
@@ -165,7 +160,6 @@ object ServiceManager {
 
     /**
      * Обновляет состояние сервиса (вызывается из [TunnelVpnService] при смене статуса).
-     * Любой явный сигнал от сервиса снимает страховочный таймер.
      */
     fun updateState(newState: ServiceState) {
         synchronized(lock) {
