@@ -38,7 +38,7 @@ struct poolhd *init_pool(int count)
     for (int i = 0; i < count; i++) {
         pool->links[i] = &(pool->items[i]);
     }
-    memset(pool->items, 0, sizeof(*pool->items));
+    memset(pool->items, 0, sizeof(*pool->items) * count);
     return pool;
 }
 
@@ -193,6 +193,23 @@ int mod_etype(struct poolhd *pool, struct eval *val, int type)
     return epoll_ctl(pool->efd, EPOLL_CTL_MOD, val->fd, &ev);
 }
 
+int replace_event_fd(struct poolhd *pool, struct eval *val, int new_fd, int e)
+{
+    assert(val->fd >= 0 && new_fd >= 0);
+    struct epoll_event ev = {
+        .events = _POLLDEF | e, .data = {val}
+    };
+    if (epoll_ctl(pool->efd, EPOLL_CTL_ADD, new_fd, &ev)) {
+        uniperror("replace event");
+        return -1;
+    }
+    epoll_ctl(pool->efd, EPOLL_CTL_DEL, val->fd, 0);
+    close(val->fd);
+    val->fd = new_fd;
+    val->mod_iter = pool->iters;
+    return 0;
+}
+
 #else
 struct eval *next_event(struct poolhd *pool, int *offs, int *typel, int ms)
 {
@@ -229,6 +246,18 @@ int mod_etype(struct poolhd *pool, struct eval *val, int type)
    assert(val->index >= 0 && val->index < pool->count);
    pool->pevents[val->index].events = _POLLDEF | type;
    return 0;
+}
+
+int replace_event_fd(struct poolhd *pool, struct eval *val, int new_fd, int e)
+{
+    assert(val->index >= 0 && val->index < pool->count && new_fd >= 0);
+    close(val->fd);
+    val->fd = new_fd;
+    val->mod_iter = pool->iters;
+    pool->pevents[val->index].fd = new_fd;
+    pool->pevents[val->index].events = _POLLDEF | e;
+    pool->pevents[val->index].revents = 0;
+    return 0;
 }
 #endif
 

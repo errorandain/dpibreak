@@ -44,6 +44,23 @@ fake_udp = {
 };
 
 
+static const struct params default_params = {
+    .await_int = 10,
+    
+    .ipv6 = 1,
+    .resolve = 1,
+    .udp = 1,
+    .max_open = 512,
+    .bfsize = 16384,
+    .baddr = {
+        .in6 = { .sin6_family = AF_INET6 }
+    },
+    .laddr = {
+        .in = { .sin_family = AF_INET }
+    },
+    .debug = 0
+};
+
 struct params params = {
     .await_int = 10,
     
@@ -318,6 +335,13 @@ int parse_hosts(struct mphdr *hdr, char *buffer, size_t size)
     char *e = buffer, *s = buffer;
     
     for (; e <= end; e++) {
+        if (s == e && e < end && *e == '#') {
+            while (e < end && *e != '\n') {
+                e++;
+            }
+            s = e + 1;
+            continue;
+        }
         if (e != end && *e != ' ' && *e != '\n' && *e != '\r') {
             if (lower_char(e)) {
                 drop = 1;
@@ -376,6 +400,13 @@ int parse_ipset(struct mphdr *hdr, char *buffer, size_t size)
     char *e = buffer, *s = buffer;
     
     for (; e <= end; e++) {
+        if (s == e && e < end && *e == '#') {
+            while (e < end && *e != '\n') {
+                e++;
+            }
+            s = e + 1;
+            continue;
+        }
         if (e != end && *e != ' ' && *e != '\n' && *e != '\r') {
             continue;
         }
@@ -605,7 +636,7 @@ static struct desync_params *add_group(struct desync_params *prev)
         prev->next = dp;
     }
     dp->id = params.dp_n;
-    dp->bit = 1 << dp->id;
+    dp->bit = (dp->id < 64) ? (1ULL << dp->id) : 0;
     dp->str = "";
     
     params.dp_n++;
@@ -666,6 +697,8 @@ void clear_params(char *line, char **argv)
     for (int i = 0; i < params.need_free_n; i++) {
         free(params.need_free[i]);
     }
+    free(params.need_free);
+    params.need_free = 0;
     params.need_free_n = 0;
     
     struct desync_params *dp = params.dp;
@@ -682,7 +715,7 @@ void clear_params(char *line, char **argv)
         memset(t, 0, sizeof(*t));
         free(t);
     }
-    params.dp = 0;
+    params = default_params;
 }
 
 
@@ -1330,8 +1363,14 @@ int init(void)
 }
 
 
-int main(int argc, char **argv) 
+#ifdef ANDROID_APP
+int byedpi_main(int argc, char **argv)
+#else
+int main(int argc, char **argv)
+#endif
 {
+    params = default_params;
+
     #ifdef _WIN32
     WSADATA wsa;
     

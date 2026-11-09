@@ -6,9 +6,17 @@
     <string name="vpn_notification_text">Обход DPI включён</string>
     <string name="btn_start">Включить обход</string>
     <string name="btn_stop">Выключить обход</string>
+    <string name="btn_autotest">Подобрать рабочую стратегию</string>
+    <string name="btn_autotest_stop">Остановить подбор</string>
     <string name="status_idle">Обход выключен</string>
     <string name="status_starting">Запуск…</string>
     <string name="status_active">Обход работает</string>
     <string name="preset_picker_title">Режим обхода:</string>
-    <string name="preset_locked_hint">(выключите обход, чтобы сменить режим)</string>
+    <string name="preset_locked_hint">(выключите обход, чтобы изменить настройки)</string>
+    <string name="custom_cmd_label">Аргументы командной строки (как в ByeByeDPI)</string>
+    <string name="custom_cmd_placeholder">-o1 -a1 -r-5+se</string>
+    <string name="opt_block_quic_title">Блокировать QUIC (UDP 443)</string>
+    <string name="opt_block_quic_desc">Заставляет YouTube и браузер сразу идти по TCP, если оператор глушит QUIC</string>
+    <string name="opt_ipv6_title">IPv6 в туннеле</string>
+    <string name="opt_ipv6_desc">По умолчанию выключено (как в ByeByeDPI) — на мобильных сетях без IPv6 оставляйте выключенным</string>
 </resources>

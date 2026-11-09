@@ -3,6 +3,8 @@ package com.dpibreak.core
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.dpibreak.core.vpn.TunnelVpnService
+import com.dpibreak.domain.Presets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -12,8 +14,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import com.dpibreak.core.vpn.TunnelVpnService
-import com.dpibreak.domain.Presets
 
 private const val TAG = "DPIBreak"
 
@@ -21,8 +21,7 @@ private const val TAG = "DPIBreak"
  * Состояние VPN-сервиса.
  *
  * [ServiceState.Starting] — команда запустить отдана, сервис ещё не подтвердил,
- * что конвейер собран. Именно здесь раньше возникал рассинхрон: состояние сразу
- * ставили Active, и при медленном/неудачном старте UI врал пользователю.
+ * что конвейер собран.
  */
 sealed class ServiceState {
     object Idle : ServiceState()
@@ -47,6 +46,7 @@ object ServiceManager {
     /** Сколько ждём, пока сервис подтвердит остановку. */
     private const val STOP_TIMEOUT_MS = 10_000L
 
+    private val lock = Any()
     private val _state = MutableStateFlow<ServiceState>(ServiceState.Idle)
     val state: StateFlow<ServiceState> = _state.asStateFlow()
 
@@ -55,7 +55,7 @@ object ServiceManager {
      * [ServiceState.Starting] — тоже «включено», иначе двойной тап поднимет второй сервис.
      */
     val isRunning: Boolean
-        get() = _state.value is ServiceState.Starting || _state.value is ServiceState.Active
+        get() = _state.value.let { it is ServiceState.Starting || it is ServiceState.Active }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -73,25 +73,31 @@ object ServiceManager {
      * Запускает VPN-сервис через startForegroundService.
      */
     fun start(context: Context) {
-        if (isRunning) return
+        synchronized(lock) {
+            if (isRunning) return
+            timeoutJob?.cancel()
+            timeoutJob = null
+            _state.value = ServiceState.Starting
+        }
 
         val appContext = context.applicationContext
-        _state.value = ServiceState.Starting
 
-        // Выбранный пресет передаётся в сервис аргументами движка
+        // Выбранная стратегия и настройки туннеля передаются в сервис через Intent
         val preset = Presets.getSelected(appContext)
+        val effectiveArgs = Presets.resolveEffectiveArgs(appContext, preset)
         val intent = Intent(appContext, TunnelVpnService::class.java).apply {
             action = TunnelVpnService.ACTION_START
             putStringArrayListExtra(
                 TunnelVpnService.EXTRA_ENGINE_ARGS,
-                ArrayList(preset.byedpiArgs)
+                ArrayList(effectiveArgs)
             )
+            putExtra(TunnelVpnService.EXTRA_IPV6_ENABLED, Presets.isIpv6Enabled(appContext))
+            putExtra(TunnelVpnService.EXTRA_BLOCK_QUIC, Presets.isBlockQuicEnabled(appContext))
         }
 
         try {
             appContext.startForegroundService(intent)
         } catch (t: Throwable) {
-            // Android 12+ может отказать в старте foreground-сервиса из фона.
             Log.e(TAG, "startForegroundService rejected", t)
             updateState(
                 ServiceState.Error(
@@ -104,14 +110,18 @@ object ServiceManager {
         armTimeout(
             START_TIMEOUT_MS,
             onTimeout = {
-                if (_state.value is ServiceState.Starting) {
-                    updateState(
-                        ServiceState.Error(
+                val timedOut = synchronized(lock) {
+                    if (_state.value is ServiceState.Starting) {
+                        _state.value = ServiceState.Error(
                             "Сервис не подтвердил запуск за " +
                                 "${START_TIMEOUT_MS / 1000} с — попробуйте выключить и включить снова"
                         )
-                    )
-                    // Страховка: если сервис живой, но завис, не оставляем его висеть.
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (timedOut) {
                     runCatching {
                         appContext.stopService(
                             Intent(appContext, TunnelVpnService::class.java)
@@ -124,10 +134,6 @@ object ServiceManager {
 
     /**
      * Останавливает VPN-сервис.
-     *
-     * Состояние здесь НЕ меняется: Active → Idle переведёт сам сервис, когда
-     * разберёт конвейер (иначе UI «опережает» реальность). Если он не ответит
-     * за [STOP_TIMEOUT_MS], состояние сбрасываем принудительно.
      */
     fun stop(context: Context) {
         val appContext = context.applicationContext
@@ -136,17 +142,17 @@ object ServiceManager {
             stopIntent.action = TunnelVpnService.ACTION_STOP
             appContext.startService(stopIntent)
         } catch (t: Throwable) {
-            // Приложение уже в фоне и startService недоступен — просим систему
-            // остановить сервис напрямую (разборку сделаем в onDestroy).
             Log.w(TAG, "ACTION_STOP delivery failed, falling back to stopService", t)
             runCatching { appContext.stopService(stopIntent) }
         }
         armTimeout(
             STOP_TIMEOUT_MS,
             onTimeout = {
-                if (isRunning) {
-                    Log.w(TAG, "Service did not confirm stop — forcing Idle")
-                    updateState(ServiceState.Idle)
+                synchronized(lock) {
+                    if (isRunning) {
+                        Log.w(TAG, "Service did not confirm stop — forcing Idle")
+                        _state.value = ServiceState.Idle
+                    }
                 }
             }
         )
@@ -154,20 +160,28 @@ object ServiceManager {
 
     /**
      * Обновляет состояние сервиса (вызывается из [TunnelVpnService] при смене статуса).
-     * Любой явный сигнал от сервиса снимает страховочный таймер.
      */
     fun updateState(newState: ServiceState) {
-        timeoutJob?.cancel()
-        timeoutJob = null
-        _state.value = newState
+        synchronized(lock) {
+            timeoutJob?.cancel()
+            timeoutJob = null
+            _state.value = newState
+        }
     }
 
     private fun armTimeout(timeoutMs: Long, onTimeout: suspend () -> Unit) {
-        timeoutJob?.cancel()
-        timeoutJob = scope.launch {
-            delay(timeoutMs)
-            timeoutJob = null
-            onTimeout()
+        synchronized(lock) {
+            timeoutJob?.cancel()
+            val job = scope.launch {
+                delay(timeoutMs)
+                synchronized(lock) {
+                    if (timeoutJob === coroutineContext[Job]) {
+                        timeoutJob = null
+                    }
+                }
+                onTimeout()
+            }
+            timeoutJob = job
         }
     }
 }

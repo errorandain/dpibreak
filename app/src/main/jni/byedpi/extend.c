@@ -832,16 +832,20 @@ ssize_t udp_hook(struct eval *val,
 #ifdef __linux__
 static int protect(int conn_fd, const char *path)
 {
-    struct sockaddr_un sa;
+    struct sockaddr_un sa = { 0 };
     sa.sun_family = AF_UNIX;
-    strcpy(sa.sun_path, path);
+    if (strlen(path) >= sizeof(sa.sun_path)) {
+        LOG(LOG_E, "protect path too long\n");
+        return -1;
+    }
+    strncpy(sa.sun_path, path, sizeof(sa.sun_path) - 1);
     
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         uniperror("socket");  
         return -1;
     }
-    struct timeval tv = { .tv_sec = 1 };
+    struct timeval tv = { .tv_sec = 2 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     
@@ -851,8 +855,9 @@ static int protect(int conn_fd, const char *path)
         close(fd);
         return -1;
     }
-    char buf[CMSG_SPACE(sizeof(fd))] = { 0 };
-    struct iovec io = { .iov_base = "1", .iov_len = 1 };
+    char buf[CMSG_SPACE(sizeof(conn_fd))] = { 0 };
+    char marker = '1';
+    struct iovec io = { .iov_base = &marker, .iov_len = 1 };
     struct msghdr msg = { .msg_iov = &io };
     
     msg.msg_iovlen = 1;
@@ -864,20 +869,25 @@ static int protect(int conn_fd, const char *path)
     cmsg->cmsg_type = SCM_RIGHTS;
     cmsg->cmsg_len = CMSG_LEN(sizeof(conn_fd));
 
-    *((int *)CMSG_DATA(cmsg)) = conn_fd;
+    memcpy(CMSG_DATA(cmsg), &conn_fd, sizeof(conn_fd));
     msg.msg_controllen = CMSG_SPACE(sizeof(conn_fd));
 
-    if (sendmsg(fd, &msg, 0) < 0) {
+    if (sendmsg(fd, &msg, MSG_NOSIGNAL) < 0) {
         uniperror("sendmsg");
         close(fd);
         return -1;
     }
-    if (recv(fd, buf, 1, 0) < 1) {
+    char reply = 0;
+    ssize_t r = recv(fd, &reply, 1, 0);
+    close(fd);
+    if (r < 1) {
         uniperror("recv");
-        close(fd);
         return -1;
     }
-    close(fd);
+    if (reply != 1) {
+        LOG(LOG_E, "protect rejected by VpnService\n");
+        return -1;
+    }
     return 0;
 }
 #endif

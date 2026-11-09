@@ -13,14 +13,24 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -29,7 +39,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -37,18 +46,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.dpibreak.core.ServiceManager
 import com.dpibreak.core.ServiceState
+import com.dpibreak.core.engine.StrategyTester
 import com.dpibreak.domain.Presets
 
 /**
- * Главный экран: статус, выбор пресета обхода, кнопка вкл/выкл.
+ * Главный экран: статус, выбор пресета обхода, автоподбор стратегии, ввод строки ByeByeDPI и настройки туннеля.
  */
 class MainActivity : ComponentActivity() {
 
-    /**
-     * Системный диалог разрешения VPN. Раньше результат игнорировался: после
-     * согласия приходилось нажимать кнопку «Включить» второй раз, а при отказе
-     * статус так и оставался «Обход выключен» без объяснения причины.
-     */
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -63,15 +68,13 @@ class MainActivity : ComponentActivity() {
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        // Разрешение на уведомления получено или отклонено — не критично:
-        // foreground-сервис работает и без него, просто без уведомления.
+    ) { _ ->
+        // Foreground-сервис работает и без разрешения на уведомления.
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Разрешение на уведомления для Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(
                     this, Manifest.permission.POST_NOTIFICATIONS
@@ -88,18 +91,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Запрашивает разрешение VPN и только потом запускает сервис. */
+    internal fun onToggleClick() {
+        if (ServiceManager.isRunning) {
+            ServiceManager.stop(this)
+        } else {
+            requestVpnAndStart()
+        }
+    }
+
     internal fun requestVpnAndStart() {
         val prepareIntent = VpnService.prepare(this)
         if (prepareIntent == null) {
-            ServiceManager.toggle(this)
+            ServiceManager.start(this)
             return
-        }
-        // Разрешения нет — значит рабочий туннеля точно отсутствует (например,
-        // отзывали в настройках). Возвращаем UI в Idle, иначе start() после
-        // диалога увидит «уже запущено» и промолчит.
-        if (ServiceManager.isRunning) {
-            ServiceManager.updateState(ServiceState.Idle)
         }
         vpnPermissionLauncher.launch(prepareIntent)
     }
@@ -109,21 +113,27 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(activity: MainActivity) {
     val serviceState by ServiceManager.state.collectAsStateWithLifecycle()
+    val testerState by StrategyTester.state.collectAsStateWithLifecycle()
     val context = activity
 
     val isActive = serviceState is ServiceState.Active
     val isStarting = serviceState is ServiceState.Starting
-    val isButtonEnabled = !isStarting
+    val isTesting = testerState is StrategyTester.State.Running
+    val isButtonEnabled = !isStarting && !isTesting
+    val canEditSettings =
+        (serviceState is ServiceState.Idle || serviceState is ServiceState.Error) && !isTesting
 
-    // Пресет обхода: выбирается чипами, сохраняется в SharedPreferences
     var selectedPreset by remember { mutableStateOf(Presets.getSelected(context)) }
-    // Менять пресет можно только при выключенном обходе
-    val canEditPreset = serviceState is ServiceState.Idle || serviceState is ServiceState.Error
+    var customCmd by remember { mutableStateOf(Presets.getCustomCmd(context)) }
+    var blockQuic by remember { mutableStateOf(Presets.isBlockQuicEnabled(context)) }
+    var ipv6Enabled by remember { mutableStateOf(Presets.isIpv6Enabled(context)) }
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .safeDrawingPadding()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -139,9 +149,8 @@ fun MainScreen(activity: MainActivity) {
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
-            // --- Выбор пресета ---
             Text(
                 text = stringResource(R.string.preset_picker_title),
                 style = MaterialTheme.typography.titleMedium
@@ -158,7 +167,7 @@ fun MainScreen(activity: MainActivity) {
                             selectedPreset = preset
                             Presets.setSelected(context, preset.id)
                         },
-                        enabled = canEditPreset,
+                        enabled = canEditSettings,
                         label = { Text(preset.title) }
                     )
                 }
@@ -166,15 +175,88 @@ fun MainScreen(activity: MainActivity) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = selectedPreset.description +
-                    if (!canEditPreset) "\n\n" + stringResource(R.string.preset_locked_hint) else "",
+                    if (!canEditSettings && !isTesting) "\n\n" + stringResource(R.string.preset_locked_hint) else "",
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            if (selectedPreset.id == Presets.CUSTOM.id) {
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = customCmd,
+                    onValueChange = { value ->
+                        customCmd = value
+                        Presets.setCustomCmd(context, value)
+                    },
+                    enabled = canEditSettings,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(stringResource(R.string.custom_cmd_label)) },
+                    placeholder = { Text(stringResource(R.string.custom_cmd_placeholder)) },
+                    minLines = 2,
+                    maxLines = 5
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(modifier = Modifier.height(12.dp))
+
+            SettingToggleRow(
+                title = stringResource(R.string.opt_block_quic_title),
+                description = stringResource(R.string.opt_block_quic_desc),
+                checked = blockQuic,
+                enabled = canEditSettings,
+                onCheckedChange = { checked ->
+                    blockQuic = checked
+                    Presets.setBlockQuicEnabled(context, checked)
+                }
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            SettingToggleRow(
+                title = stringResource(R.string.opt_ipv6_title),
+                description = stringResource(R.string.opt_ipv6_desc),
+                checked = ipv6Enabled,
+                enabled = canEditSettings,
+                onCheckedChange = { checked ->
+                    ipv6Enabled = checked
+                    Presets.setIpv6Enabled(context, checked)
+                }
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            when (val ts = testerState) {
+                is StrategyTester.State.Running -> {
+                    Text(
+                        text = "Подбор стратегии ${ts.currentIndex}/${ts.totalCount}: ${ts.currentCmd}",
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                is StrategyTester.State.Completed -> {
+                    val resultMsg = if (ts.winningCmd != null) {
+                        "Подобрана стратегия (${ts.score}/${ts.maxScore}): ${ts.winningCmd}\nНажмите «Включить обход»."
+                    } else {
+                        "Ни одна из базовых стратегий не получила ответ. Проверьте интернет или укажите свою строку."
+                    }
+                    Text(
+                        text = resultMsg,
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Center,
+                        color = if (ts.winningCmd != null) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                StrategyTester.State.Idle -> Unit
+            }
 
             Button(
-                onClick = { activity.requestVpnAndStart() },
+                onClick = { activity.onToggleClick() },
                 enabled = isButtonEnabled
             ) {
                 Text(
@@ -182,6 +264,60 @@ fun MainScreen(activity: MainActivity) {
                     else stringResource(R.string.btn_start)
                 )
             }
+
+            if (!isActive && !isStarting) {
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        if (isTesting) {
+                            StrategyTester.cancel()
+                        } else {
+                            StrategyTester.start(context) { winningCmd ->
+                                customCmd = winningCmd
+                                selectedPreset = Presets.CUSTOM
+                            }
+                        }
+                    }
+                ) {
+                    Text(
+                        if (isTesting) stringResource(R.string.btn_autotest_stop)
+                        else stringResource(R.string.btn_autotest)
+                    )
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun SettingToggleRow(
+    title: String,
+    description: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled
+        )
     }
 }

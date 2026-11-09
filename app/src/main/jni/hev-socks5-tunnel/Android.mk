@@ -56,16 +56,17 @@ LOCAL_STATIC_LIBRARIES := yaml lwip hev-task-system
 LOCAL_LDFLAGS += $(HEV_SOCKS5_TUNNEL_LDFLAGS)
 include $(BUILD_SHARED_LIBRARY)
 
-# Standalone executable build
-include $(CLEAR_VARS)
-LOCAL_MODULE := hev-socks5-tunnel-bin
-LOCAL_SRC_FILES := $(HEV_SOCKS5_TUNNEL_SRC)
-LOCAL_C_INCLUDES := $(HEV_SOCKS5_TUNNEL_INCLUDES)
-LOCAL_CFLAGS += -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED
-LOCAL_CFLAGS += $(VERSION_CFLAGS)
-ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
-LOCAL_CFLAGS += -mfpu=neon
-endif
-LOCAL_STATIC_LIBRARIES := yaml lwip hev-task-system
-LOCAL_LDFLAGS += $(HEV_SOCKS5_TUNNEL_LDFLAGS)
-include $(BUILD_EXECUTABLE)
+# Standalone executable build (не используется в Android-приложении —
+# отключено, чтобы не компилировать исходники туннеля дважды)
+# include $(CLEAR_VARS)
+# LOCAL_MODULE := hev-socks5-tunnel-bin
+# LOCAL_SRC_FILES := $(HEV_SOCKS5_TUNNEL_SRC)
+# LOCAL_C_INCLUDES := $(HEV_SOCKS5_TUNNEL_INCLUDES)
+# LOCAL_CFLAGS += -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED
+# LOCAL_CFLAGS += $(VERSION_CFLAGS)
+# ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
+# LOCAL_CFLAGS += -mfpu=neon
+# endif
+# LOCAL_STATIC_LIBRARIES := yaml lwip hev-task-system
+# LOCAL_LDFLAGS += $(HEV_SOCKS5_TUNNEL_LDFLAGS)
+# include $(BUILD_EXECUTABLE)
